@@ -1,0 +1,27 @@
+{
+  "name": "compilez",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A shared, real-time firmware build station for your local network.",
+  "type": "module",
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "build:css": "tailwindcss -i public/styles.css -o public/tailwind.css --minify",
+    "test": "node --test",
+    "check": "node --check server.js && node --check public/app.js && bash -n setup.sh",
+    "postinstall": "npm run build:css"
+  },
+  "dependencies": {
+    "@tailwindcss/cli": "4.3.0",
+    "express": "^4.21.2",
+    "lucide": "^0.468.0",
+    "socket.io": "^4.8.1",
+    "systeminformation": "^5.27.0",
+    "tailwindcss": "^4.3.3"
+  },
+  "devDependencies": {
+    "socket.io-client": "^4.8.1"
+  }
+}

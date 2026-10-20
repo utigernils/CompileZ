@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#101212">
+  <meta name="description" content="CompileZ local network build station">
+  <title>CompileZ / Build Console</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/tailwind.css">
+  <script src="/socket.io/socket.io.js" defer></script>
+  <script src="/vendor/lucide.js" defer></script>
+  <script src="/app.js" defer></script>
+</head>
+<body class="bg-gray-950 text-gray-200 antialiased">
+  <header class="topbar">
+    <a href="/" class="brand" aria-label="CompileZ home"><span class="brand-mark"><i data-lucide="zap"></i></span><span>Compile<span class="accent">Z</span></span><span class="version">v1.0</span></a>
+    <div class="server-identity"><span class="server-symbol"><i data-lucide="server"></i></span><span id="host-name">LOCAL BUILD SERVER</span><span class="identity-divider">/</span><span class="muted">Build server</span></div>
+    <div class="connection"><span class="status-dot" id="connection-dot"></span><span id="connection-label">Connecting</span><span class="network-label">LOCAL NETWORK</span></div>
+    <button class="icon-button" id="server-button" title="Server details" aria-label="Server details"><i data-lucide="sliders-horizontal"></i></button>
+  </header>
+
+  <main class="workspace">
+    <div class="page-heading"><div><div class="eyebrow"><span class="tiny-square"></span> WORKSPACE <span class="muted">/</span> LOCAL</div><h1>Build console</h1></div><div class="heading-meta"><span class="muted mono" id="sample-time">Waiting for telemetry</span></div></div>
+
+    <section class="metrics" aria-label="Live hardware statistics">
+      <div class="metric"><div class="metric-top"><span><i data-lucide="cpu"></i> CPU LOAD</span><span class="metric-tag" id="cpu-cores">-- CORES</span></div><div class="metric-bottom"><div><span class="metric-number" id="cpu-value">--</span><span class="metric-unit">%</span></div><canvas id="cpu-chart" width="150" height="45" aria-label="CPU usage history"></canvas></div><div class="meter-track"><span id="cpu-meter"></span></div></div>
+      <div class="metric"><div class="metric-top"><span><i data-lucide="thermometer"></i> CPU TEMPERATURE</span><span class="metric-tag" id="temp-label">SENSOR</span></div><div class="metric-bottom"><div><span class="metric-number" id="temp-value">--</span><span class="metric-unit">&deg;C</span></div><canvas id="temp-chart" width="150" height="45" aria-label="CPU temperature history"></canvas></div><div class="meter-track amber"><span id="temp-meter"></span></div></div>
+      <div class="metric"><div class="metric-top"><span><i data-lucide="memory-stick"></i> MEMORY USAGE</span><span class="metric-tag" id="memory-percent">--%</span></div><div class="metric-bottom"><div><span class="metric-number" id="memory-value">--</span><span class="metric-unit memory-total" id="memory-total">/ -- GB</span></div><canvas id="memory-chart" width="150" height="45" aria-label="Memory usage history"></canvas></div><div class="meter-track cyan"><span id="memory-meter"></span></div></div>
+      <div class="metric worker-metric"><div class="metric-top"><span><i data-lucide="layers-2"></i> BUILD WORKERS</span><span class="worker-state" id="worker-state">IDLE</span></div><div class="metric-bottom"><div><span class="metric-number" id="worker-value">0</span><span class="metric-unit" id="worker-limit">/ 2</span></div><div class="worker-slots" id="worker-slots"><span></span><span></span></div></div><div class="worker-description" id="worker-description">All systems ready</div></div>
+    </section>
+
+    <div class="content-grid">
+      <section class="console-column" aria-label="Build workspace">
+        <div class="section-label"><span><i data-lucide="folder-git-2"></i> PROJECT TARGET</span><span class="shared-label"><i data-lucide="users"></i> SHARED WORKSPACE</span></div>
+        <form id="project-form" class="project-controls"><div class="path-field"><i data-lucide="folder"></i><input id="project-path" aria-label="Server project path" autocomplete="off" spellcheck="false" placeholder="/home/projects/firmware"><button type="button" id="browse-button" class="browse-button"><i data-lucide="folder-search"></i><span>Browse</span></button></div><button type="submit" id="compile-button" class="compile-button"><i data-lucide="zap"></i><span>COMPILE</span><i data-lucide="arrow-up-right" class="compile-arrow"></i></button></form>
+        <div class="project-detail"><span class="project-type"><span class="status-dot"></span><span id="project-name">signal-node</span></span><span class="mono">SERVER-SIDE BUILD</span></div>
+
+        <section class="terminal-shell" aria-label="Build terminal">
+          <div class="terminal-toolbar"><div class="terminal-tab"><i data-lucide="square-terminal"></i><span>Terminal</span><span class="terminal-tab-dot"></span></div><div class="terminal-tools"><button class="icon-button" id="download-logs" title="Download logs" aria-label="Download logs"><i data-lucide="download"></i></button><button class="icon-button" id="wrap-button" title="Toggle line wrapping" aria-label="Toggle line wrapping" aria-pressed="false"><i data-lucide="wrap-text"></i></button><button class="icon-button active" id="follow-button" title="Follow latest output" aria-label="Follow latest output" aria-pressed="true"><i data-lucide="arrow-down-to-line"></i></button></div></div>
+          <div class="build-heading"><div class="build-title"><span class="build-status-badge" id="terminal-status">STANDBY</span><span id="terminal-project">No build selected</span></div><div class="build-heading-right"><span class="mono muted" id="terminal-id">SESSION / --</span><button class="stop-button" id="stop-button" hidden><i data-lucide="square"></i><span>Stop</span></button></div></div>
+          <div class="build-progress" id="build-progress"><span id="progress-fill"></span></div>
+          <div class="terminal-output" id="terminal-output" tabindex="0" aria-label="Compiler output"><div class="terminal-empty" id="terminal-empty"><div class="terminal-empty-symbol"><i data-lucide="terminal"></i></div><h2>No build selected</h2><p class="mono">Idle</p></div><pre id="log-lines" class="text-green-400" hidden></pre></div>
+          <div class="terminal-footer"><span><span class="status-dot" id="terminal-live-dot"></span><span id="terminal-live">Terminal ready</span><span class="footer-divider">/</span><span id="line-count">0 lines</span></span><span><i data-lucide="timer"></i><span id="elapsed">00:00</span><span class="footer-divider">/</span><span>UTF-8</span></span></div>
+        </section>
+        <div class="workspace-note"><span><i data-lucide="lock-keyhole"></i> LOCAL EXECUTION<span class="note-divider">/</span><span id="execution-note">No active processes</span></span><span class="sync-note"><i data-lucide="refresh-cw"></i> Real-time sync</span></div>
+        <section class="config-editor" aria-labelledby="config-heading">
+          <div class="config-heading"><h2 id="config-heading"><i data-lucide="file-code-2"></i> Compiler config <span class="config-filename">platformio.ini</span></h2><button type="button" class="icon-button" id="reload-config" title="Reload config from disk" aria-label="Reload config from disk"><i data-lucide="rotate-cw"></i></button></div>
+          <div class="config-path mono" id="config-path">NO PROJECT LOADED</div>
+          <textarea id="config-content" aria-label="Compiler configuration" aria-describedby="config-status" spellcheck="false" autocapitalize="off" autocomplete="off" wrap="off" placeholder="; platformio.ini" disabled></textarea>
+          <div class="config-footer"><span id="config-status" class="config-status" role="status" aria-live="polite">Waiting for project</span><button type="button" id="save-config" class="primary-button" disabled><i data-lucide="save"></i> SAVE CONFIG</button></div>
+        </section>
+      </section>
+
+      <aside class="queue-panel" id="queue-panel" aria-label="Build queue and history"><div class="queue-heading"><h2><i data-lucide="list-video"></i> Build queue <span id="queue-count">0</span></h2><span class="queue-live"><span class="status-dot"></span> LIVE</span></div><div class="queue-tabs" role="group" aria-label="Filter builds"><button class="queue-tab selected" data-filter="all" aria-pressed="true">All builds</button><button class="queue-tab" data-filter="active" aria-pressed="false">Active <span id="active-count">0</span></button><button class="queue-tab" data-filter="completed" aria-pressed="false">Completed</button></div><div class="queue-list" id="queue-list"><div class="queue-empty"><div class="empty-stack"><i data-lucide="layers-2"></i></div><h3>A clean slate.</h3><p>No builds in this workspace yet.</p><span class="mono">QUEUE IS EMPTY</span></div></div><div class="queue-summary"><span><span class="summary-dot success"></span><strong id="success-count">0</strong> completed</span><span><span class="summary-dot failed"></span><strong id="failed-count">0</strong> failed</span></div></aside>
+    </div>
+
+    <footer class="page-footer"><span><span class="footer-wordmark">CompileZ</span><span class="footer-divider">/</span> Local build server</span><span><span class="status-dot"></span><span id="footer-status">Connecting to build station</span></span></footer>
+  </main>
+
+  <dialog id="directory-modal" class="directory-modal"><div class="modal-heading"><div><span class="eyebrow">SERVER FILESYSTEM</span><h2>Select project directory</h2></div><button class="icon-button" id="close-browser" title="Close directory browser" aria-label="Close directory browser"><i data-lucide="x"></i></button></div><div class="root-buttons" id="root-buttons"></div><form id="directory-form" class="directory-address"><button type="button" id="directory-up" class="icon-button" title="Parent directory" aria-label="Parent directory"><i data-lucide="arrow-up"></i></button><input id="directory-path" aria-label="Browse directory path" spellcheck="false"><button class="icon-button" title="Open directory" aria-label="Open directory"><i data-lucide="arrow-right"></i></button></form><div class="directory-list" id="directory-list"></div><div class="modal-footer"><span id="directory-count" class="mono muted">0 directories</span><button type="button" id="select-directory" class="primary-button"><i data-lucide="folder-check"></i> Select directory</button></div></dialog>
+  <dialog id="server-modal" class="directory-modal server-modal"><div class="modal-heading"><div><span class="eyebrow">BUILD STATION</span><h2>Server details</h2></div><button class="icon-button" id="close-server" title="Close server details" aria-label="Close server details"><i data-lucide="x"></i></button></div><dl id="server-details" class="server-details"></dl></dialog>
+  <div class="toast-container" id="toasts" role="status" aria-live="polite"></div>
+</body>
+</html>
