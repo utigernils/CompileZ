@@ -47,7 +47,8 @@ function setConnection(value) {
   connected = value;
   $('#connection-dot').classList.toggle('offline', !value);
   $('#connection-label').textContent = value ? 'Connected' : 'Reconnecting';
-  $('#footer-status').textContent = value ? 'All systems operational' : 'Connection lost. Reconnecting...';
+  const footerStatus = $('#footer-status');
+  if (footerStatus) footerStatus.textContent = value ? 'All systems operational' : 'Connection lost. Reconnecting...';
   $('#compile-button').disabled = !value || submitting;
   $('#browse-button').disabled = !value;
   $('#stop-button').disabled = !value || selectedBuild()?.status === 'cancelling';
@@ -142,11 +143,12 @@ function renderStats(stats, record) {
   $('#memory-total').textContent = `/ ${formatBytes(stats.memoryTotal)} GB`;
   $('#memory-percent').textContent = memory == null ? '--%' : `${Math.round(memory)}%`;
   $('#cpu-cores').textContent = `${stats.cores || '--'} CORES`;
-  $('#host-name').textContent = stats.hostname || 'LOCAL BUILD SERVER';
+  const hostnameLabel = $('#host-name');
+  if (hostnameLabel) hostnameLabel.textContent = stats.hostname || 'LOCAL BUILD SERVER';
   $('#cpu-meter').style.width = `${Math.min(100, cpu || 0)}%`;
   $('#temp-meter').style.width = `${Math.min(100, temperature || 0)}%`;
   $('#memory-meter').style.width = `${memory || 0}%`;
-  if (stats.updatedAt) $('#sample-time').textContent = `UPDATED ${new Date(stats.updatedAt).toLocaleTimeString([], { hour12: false })}`;
+  if (stats.updatedAt) $('#sample-time').textContent = `Updated ${new Date(stats.updatedAt).toLocaleTimeString([], { hour12: false })}`;
   for (const [key, value] of Object.entries({ cpu, temperature, memory })) {
     if (value != null && (record || !samples[key].length)) {
       samples[key].push(value);
@@ -233,7 +235,7 @@ function renderQueue() {
     const finished = !activeStates.has(build.status) && build.status !== 'queued';
     const timing = `Started: ${build.startedAt || 'not started'}${build.finishedAt ? ` | Finished: ${build.finishedAt}` : ''}`;
     return `<article class="build-item ${build.id === selectedId ? 'selected' : ''} ${build.status}"><button class="build-select" data-build="${build.id}" aria-label="View ${name} ${labels[build.status]} build" aria-pressed="${build.id === selectedId}"><div class="build-item-top"><span class="build-item-icon ${build.status}"><i data-lucide="${statusIcons[build.status]}"></i></span><span class="build-project-name" title="${name}">${name}</span></div><div class="build-item-meta"><span class="build-label ${build.status}">${labels[build.status]}</span><span class="mono">#${build.id.slice(0, 8)}</span><span class="build-time" data-duration="${build.id}">${duration(build)}</span></div><div class="build-timestamp" title="${escapeHtml(timing)}">${build.startedAt ? `<time datetime="${build.startedAt}">${escapeHtml(timestamp(build.startedAt))}</time>` : 'Not started'}</div><div class="build-step" data-step="${build.id}" title="${escapeHtml(build.step)}">${escapeHtml(build.step)}</div>${activeStates.has(build.status) ? '<div class="queue-progress"><span></span></div>' : ''}</button>${build.artifact ? `<a class="artifact-link" href="/api/builds/${build.id}/artifact"><i data-lucide="download"></i> Download .bin <span>${(build.artifact.bytes / 1024).toFixed(1)} KB</span></a>` : ''}${build.status === 'queued' ? `<button class="cancel-queued" data-cancel="${build.id}" title="Cancel queued build" aria-label="Cancel queued ${name} build"><i data-lucide="x"></i></button>` : ''}${finished ? `<button class="delete-build icon-button" data-delete="${build.id}" title="Delete build" aria-label="Delete ${name}"><i data-lucide="trash-2"></i></button>` : ''}</article>`;
-  }).join('') : `<div class="queue-empty"><div class="empty-stack"><i data-lucide="${filter === 'all' ? 'layers-2' : 'list-filter'}"></i></div><h3>${filter === 'all' ? 'A clean slate.' : 'Nothing here. '}</h3><p>${filter === 'all' ? 'No builds in this workspace yet.' : `No ${filter} builds.`}</p><span class="mono">${filter === 'all' ? 'QUEUE IS EMPTY' : 'ALL CLEAR'}</span></div>`;
+  }).join('') : `<div class="queue-empty"><div class="empty-stack"><i data-lucide="${filter === 'all' ? 'layers-2' : 'list-filter'}"></i></div><h3>${filter === 'all' ? 'No builds yet' : `No ${filter} builds`}</h3></div>`;
   icons();
 }
 
@@ -377,7 +379,7 @@ function switchView(view) {
     tab.setAttribute('aria-selected', selected);
     tab.tabIndex = selected ? 0 : -1;
   });
-  $('#dashboard-view').hidden = view !== 'dashboard';
+  $('#compile-view').hidden = view !== 'compile';
   $('#stats-view').hidden = view !== 'stats';
 }
 $$('[data-view]').forEach((tab) => {
@@ -385,7 +387,7 @@ $$('[data-view]').forEach((tab) => {
   tab.addEventListener('keydown', (event) => {
     if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
     event.preventDefault();
-    const view = event.key === 'Home' ? 'dashboard' : event.key === 'End' ? 'stats' : tab.dataset.view === 'dashboard' ? 'stats' : 'dashboard';
+    const view = event.key === 'Home' ? 'compile' : event.key === 'End' ? 'stats' : tab.dataset.view === 'compile' ? 'stats' : 'compile';
     switchView(view);
     $(`#${view}-tab`).focus();
   });

@@ -298,3 +298,93 @@ h1 { margin: 13px 0 5px; font-size: 34px; line-height: 1.2; font-weight: 500; }
 @media (min-width: 1001px) { .content-grid { align-items: stretch; } .queue-panel { height: 100%; } .queue-list { height: 0; max-height: none; } }
 @media (max-width: 1000px) { .queue-list { flex: none; height: auto; min-height: 220px; max-height: 480px; } .stats-overview { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 28px 0; } .stat-measure:nth-child(3) { padding-left: 0; } .stat-measure:nth-child(2) { border: 0; } }
 @media (max-width: 650px) { .project-controls { grid-template-columns: minmax(0, 1fr) auto; } .path-field { grid-column: 1 / -1; } .build-name-field { height: 44px; } .compile-button { width: auto; height: 44px; min-width: 122px; } .stats-updated { font-size: 8px; text-align: right; } .stat-measure { padding-right: 12px; padding-left: 17px; } .stat-measure strong { font-size: 25px; } .stat-measure > span { font-size: 10px; gap: 5px; } .stats-section-heading { align-items: flex-start; } .stats-section-heading > .mono { font-size: 8px; text-align: right; } .outcome-grid { grid-template-columns: 1fr; gap: 18px; } .project-stat > p { font-size: 11px; } }
+
+:root { --page-gutter: 35px; --content-width: 1810px; }
+.workspace, .system-overview { max-width: var(--content-width); margin-inline: auto; padding-inline: var(--page-gutter); }
+.system-overview { padding-top: 28px; }
+.system-heading { margin-bottom: 18px; }
+.system-heading > .mono { font-size: 10px; }
+.system-overview .metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); border-inline: 0; border-radius: 0; padding: 24px 0; margin: 0; background: transparent; }
+.system-overview .metric { padding: 0 24px; }
+.system-overview .metric:first-child { padding-left: 0; }
+.system-overview .metric:last-child { padding-right: 0; }
+.system-overview .metric-top { font: 11px var(--font); min-height: 20px; white-space: normal; }
+.system-overview .metric-top svg { width: 15px; height: 15px; }
+.system-overview .metric-tag { display: inline; font: 9px var(--mono); color: #899487; }
+.system-overview .metric-bottom { min-height: 46px; margin-top: 17px; gap: 14px; align-items: center; }
+.system-overview .metric-number { font-size: 32px; }
+.system-overview .metric-unit { font-size: 14px; }
+.system-overview .memory-total { display: inline; font-size: 11px; margin: 0 0 0 6px; }
+.system-overview canvas { width: 36%; max-width: 125px; height: 42px; }
+.system-overview .meter-track { margin-top: 18px; }
+.system-overview .worker-metric { display: block; }
+.system-overview .worker-state { background: none; border: 0; font: 9px var(--mono); padding: 0; }
+.system-overview .worker-description { margin-top: 16px; font-size: 11px; }
+.workspace { padding-top: 28px; }
+.view-tabs { margin: 0 0 28px; }
+.view-tab { font-size: 13px; padding-bottom: 17px; }
+.page-heading { margin-bottom: 28px; min-height: 44px; }
+.page-heading h1 { margin: 0; font-size: 30px; line-height: 1.3; }
+.stats-section-heading h2, .config-heading h2 { font-size: 15px; font-weight: 500; }
+.section-meta { font-size: 11px; color: var(--muted); text-align: right; }
+.project-section { border-top: 1px solid var(--line); padding-top: 24px; }
+.project-section .stats-section-heading { margin-bottom: 20px; }
+.project-detail { margin: 12px 0 25px; font-size: 11px; }
+.path-field, .build-name-field { background: #161a17; border-color: var(--line); }
+.build-name-field > span { font: 9px var(--font); }
+.build-name-field input, .path-field input { font-size: 12px; }
+.terminal-shell { border-color: var(--line); border-radius: 4px; }
+.terminal-toolbar { height: 54px; background: #141716; padding-inline: 18px; }
+.terminal-tab { font-size: 14px; }
+.terminal-tab:after { display: none; }
+.terminal-tab > svg { color: #a4b595; }
+.terminal-output { background-image: none; }
+.terminal-footer { background: #141716; border-color: var(--line); font-size: 9px; }
+.config-editor { margin-top: 28px; padding-top: 24px; }
+#config-content { background: var(--terminal); border-color: var(--line); border-radius: 4px; }
+.queue-panel { border-inline: 0; border-radius: 0; background: transparent; }
+.queue-heading { padding: 24px 0 20px; }
+.queue-heading h2 { font-size: 15px; }
+#queue-count { background: transparent; color: var(--muted); padding: 0; font-size: 11px; }
+.queue-tabs { margin-inline: 0; gap: 22px; }
+.queue-tab { font-size: 11px; }
+.queue-list { padding: 18px 0; }
+.build-item { background: #151916; border-color: var(--line); }
+.build-item.selected { background: #1b2118; border-color: #6e855e; }
+.queue-summary { padding-inline: 0; font-size: 10px; }
+@media (min-width: 1600px) { :root { --page-gutter: 45px; } }
+@media (max-width: 1200px) { :root { --page-gutter: 24px; } .system-overview .metric { padding-inline: 18px; } }
+@media (max-width: 1000px) {
+	.system-overview .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+	.system-overview .metric:nth-child(2) { border-right: 0; padding-right: 0; }
+	.system-overview .metric:nth-child(3) { border-right: 1px solid var(--line); padding: 24px 18px 0 0; }
+	.system-overview .metric:nth-child(4) { padding: 24px 0 0 18px; }
+	.system-overview .metric:nth-child(n+3) { border-top: 1px solid var(--line); margin-top: 24px; }
+}
+@media (max-width: 650px) {
+	:root { --page-gutter: 17px; }
+	.system-overview { padding-top: 22px; }
+	.system-heading { margin-bottom: 14px; }
+	.system-heading > .mono { font-size: 9px; }
+	.system-overview .metrics { padding-block: 20px; }
+	.system-overview .metric { padding-inline: 16px; }
+	.system-overview .metric-top { font-size: 11px; gap: 5px; }
+	.system-overview .metric-tag { display: none; }
+	.system-overview .metric-number { font-size: 28px; }
+	.system-overview .metric-unit { font-size: 12px; }
+	.system-overview .memory-total { display: block; font-size: 10px; margin: 5px 0 0; }
+	.system-overview .metric-bottom { min-height: 46px; margin-top: 13px; }
+	.system-overview .metric:nth-child(3) { padding-right: 16px; }
+	.system-overview .metric:nth-child(4) { padding-left: 16px; }
+	.system-overview .worker-description { font-size: 10px; }
+	.system-overview canvas { display: none; }
+	.workspace { padding-top: 25px; }
+	.page-heading { gap: 16px; align-items: flex-start; min-height: 38px; }
+	.page-heading h1 { font-size: 27px; }
+	.stats-updated { max-width: 120px; line-height: 1.7; }
+	.section-meta { font-size: 10px; }
+	.project-section .stats-section-heading { align-items: center; gap: 10px; }
+	.build-name-field input, .path-field input { font-size: 11px; }
+	.terminal-toolbar { padding-inline: 12px; }
+	.terminal-footer { font-size: 8px; }
+}
