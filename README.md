@@ -101,7 +101,17 @@ npm run build:css
 npm audit
 ```
 
-`npm run dev` restarts Node on backend edits. Run `npm run build:css` after changing frontend classes or CSS. Tests use temporary directories, real child processes, and two Socket.IO clients. The installer requires root, network access, APT, and systemd; syntax validation does not substitute for testing deployment on an actual Debian NUC.
+`npm run dev` restarts Node on backend edits. Run `npm run build:css` after changing frontend classes or CSS. Tests use temporary directories, real child processes, and multiple Socket.IO clients. The concurrency stress test submits twelve builds simultaneously to five workers, checks per-Build-ID stdout/stderr and firmware isolation on three clients, cancels one job, and lets another fail without stopping the others. The installer requires root, network access, APT, and systemd; syntax validation does not substitute for testing deployment on an actual Debian NUC.
+
+## Heavy ESP32 example
+
+Generate a real `esp32dev` workload with 192 C++ translation units, 12,288 math functions, and ArduinoJson/TFT_eSPI/FastLED dependencies:
+
+```bash
+npm run example:heavy
+```
+
+Select the absolute `example-heavy-project` directory in CompileZ to build it. For five concurrent jobs, generate independent project copies with `npm run example:heavy -- --copies 5` and configure the running server for five workers. Submissions for the same directory intentionally remain serialized. See [example-heavy-project/README.md](example-heavy-project/README.md) for full rebuilds, timing calibration, dependencies, disk requirements, and concurrent-user testing. A 15-30 second duration depends on the NUC and cache state and is not guaranteed without measurement.
 
 ## Structure
 
@@ -112,7 +122,9 @@ public/app.js                Real-time vanilla frontend
 public/styles.css            Tailwind source and dashboard styling
 public/fonts/                Self-hosted fonts and licenses
 examples/signal-node/        Runnable reference binary pipeline
+example-heavy-project/       Tunable generated ESP32 compiler workload
 test/server.test.js          Server integration tests
+test/heavy-project.test.js   Workload generator regression test
 setup.sh                     Debian provisioning and systemd setup
 .env.example                 Environment reference
 ```

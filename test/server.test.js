@@ -147,6 +147,92 @@ test('same-project jobs serialize, choose fresh firmware, retain snapshots and r
   assert.match(JSON.stringify(await (await fetch(`${base}/api/builds/${first}/logs`)).json()), /starting-1/);
 });
 
+test('simultaneous multi-user submissions isolate five workers, live logs, failures and cancellation', async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'compilez-concurrency-'));
+  const projects = await Promise.all(Array.from({ length: 12 }, async (_value, index) => {
+    const directory = path.join(root, `job-${index}`);
+    await fs.mkdir(directory);
+    await fs.writeFile(path.join(directory, 'compile.sh'), 'exec node worker.mjs\n');
+    await fs.writeFile(path.join(directory, 'worker.mjs'), `import { writeFileSync } from 'node:fs';
+const marker = 'job-${index}';
+let tick = 0;
+let result = ${index + 1};
+process.stdout.write(marker + ':START\\n');
+const timer = setInterval(() => {
+  for (let iteration = 0; iteration < 20000; iteration++) result = Math.imul(result ^ iteration, 1664525) >>> 0;
+  process.stdout.write(marker + ':OUT:' + tick + '\\n');
+  process.stderr.write(marker + ':ERR:' + tick + '\\n');
+  if (++tick === 80) {
+    clearInterval(timer);
+    writeFileSync('firmware.bin', marker);
+    process.stdout.write(marker + ':DONE\\n');
+    if (${index} === 11) process.exitCode = 7;
+  }
+}, 10);
+`);
+    return directory;
+  }));
+  const server = await createCompileZ({ roots: [root], initialPath: projects[0], dataDir: path.join(root, 'data'), hardware: false, maxConcurrent: 5 });
+  const address = await server.listen(0, '127.0.0.1');
+  const base = `http://127.0.0.1:${address.port}`;
+  const clients = Array.from({ length: 3 }, () => io(base));
+  const liveLogs = clients.map(() => []);
+  const clientStates = clients.map(() => null);
+  let current;
+  let peak = 0;
+  const observedCounts = [];
+  clients.forEach((client, index) => {
+    client.on('build:log', (entry) => liveLogs[index].push(entry));
+    client.on('state', (state) => {
+      clientStates[index] = state;
+      const running = state.builds.filter((build) => ['running', 'cancelling'].includes(build.status)).length;
+      observedCounts.push(running);
+      peak = Math.max(peak, running);
+      current = state;
+    });
+  });
+  context.after(async () => { clients.forEach((client) => client.disconnect()); await server.close(); await fs.rm(root, { recursive: true, force: true }); });
+  await waitFor(() => clients.every((client) => client.connected));
+  const submitted = await Promise.all(projects.map(async (directory, index) => {
+    const response = await fetch(`${base}/api/builds`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: directory, name: `Concurrent build ${index}` }) });
+    assert.equal(response.status, 202);
+    return { ...(await response.json()), index };
+  }));
+  assert.equal(new Set(submitted.map((build) => build.id)).size, projects.length);
+  await waitFor(() => peak === 5 && liveLogs[0].some((event) => event.entry.text.includes(':OUT:')), 'five real child processes stream output');
+  const cancelled = await waitFor(() => current.builds.find((build) => build.status === 'running' && build.path !== projects[11] && liveLogs.every((events) => events.some((event) => event.buildId === build.id && event.entry.stream === 'stderr' && event.entry.text.includes(':ERR:')))), 'cancellation target has streamed to every client');
+  const response = await fetch(`${base}/api/builds/${cancelled.id}/cancel`, { method: 'POST' });
+  assert.equal(response.status, 200);
+  const responsive = await fetch(`${base}/api/state`, { signal: AbortSignal.timeout(3000) });
+  assert.equal(responsive.status, 200);
+  await waitFor(() => clientStates.every((state) => state?.buildStatistics.totalBuilds === 12), 'all concurrent jobs finalize on every client', 12000);
+  assert.ok(observedCounts.every((count) => count <= 5));
+  assert.equal(current.builds.find((build) => build.id === cancelled.id).status, 'cancelled');
+  assert.equal(current.builds.find((build) => build.path === projects[11]).status, 'failed');
+  assert.equal(current.buildStatistics.successCount, 10);
+  assert.equal(current.buildStatistics.failureCount, 1);
+  assert.equal(current.buildStatistics.cancelledCount, 1);
+  for (const submittedBuild of submitted) {
+    const expected = `job-${submittedBuild.index}`;
+    const stored = await (await fetch(`${base}/api/builds/${submittedBuild.id}/logs`)).json();
+    for (const entry of stored.logs) {
+      const markers = entry.text.match(/job-\d+/g) || [];
+      assert.ok(markers.every((marker) => marker === expected), `stored logs mixed for ${expected}`);
+    }
+    for (const clientLogs of liveLogs) {
+      const entries = clientLogs.filter((event) => event.buildId === submittedBuild.id).map((event) => event.entry);
+      assert.ok(entries.some((entry) => entry.text.includes(`${expected}:START`)));
+      assert.ok(entries.some((entry) => entry.stream === 'stderr' && entry.text.includes(`${expected}:ERR:`)));
+      assert.equal(new Set(entries.map((entry) => entry.sequence)).size, entries.length);
+      for (const entry of entries) assert.ok((entry.text.match(/job-\d+/g) || []).every((marker) => marker === expected), `live logs mixed for ${expected}`);
+    }
+    if (submittedBuild.id !== cancelled.id && submittedBuild.index !== 11) {
+      assert.equal(await (await fetch(`${base}/api/builds/${submittedBuild.id}/artifact`)).text(), expected);
+    }
+  }
+  assert.equal((await fetch(`${base}/api/state`)).status, 200);
+});
+
 test('authentication and origin checks cover HTTP and Socket.IO', async (context) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'compilez-auth-'));
   const server = await createCompileZ({ roots: [root], initialPath: root, dataDir: path.join(root, 'data'), hardware: false, token: 'integration-password' });
