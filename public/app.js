@@ -17,6 +17,7 @@ let configLoadId = 0;
 let configNeedsReload = true;
 let savingConfig = false;
 let configError = '';
+let deleteId = null;
 const logCache = new Map();
 const samples = { cpu: [], temperature: [], memory: [] };
 const socket = io({ reconnectionDelayMax: 3000 });
@@ -48,6 +49,7 @@ function setConnection(value) {
   $('#compile-button').disabled = !value || submitting;
   $('#browse-button').disabled = !value;
   $('#stop-button').disabled = !value || selectedBuild()?.status === 'cancelling';
+  $('#confirm-delete').disabled = !value;
   renderConfigControls();
 }
 
@@ -71,6 +73,8 @@ socket.on('state', (next) => {
   renderQueue();
   renderTerminalHeading();
   renderWorkers();
+  renderBuildStatistics();
+  if (!selectedId) renderLogs();
   if (selectedId) void loadLogs(selectedId);
 });
 socket.on('stats', (stats) => { state.stats = stats; renderStats(stats, true); });
@@ -167,6 +171,39 @@ function duration(build) {
   return `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
 }
 
+function timestamp(value) {
+  return value ? new Date(value).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }) : 'Not started';
+}
+
+function formatDuration(milliseconds) {
+  const seconds = Math.max(0, Math.round((milliseconds || 0) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  return `${Math.floor(seconds / 3600)}h ${Math.floor(seconds % 3600 / 60)}m`;
+}
+
+function renderBuildStatistics() {
+  const metrics = state.buildStatistics;
+  if (!metrics) return;
+  $('#stat-total').textContent = metrics.totalBuilds.toLocaleString();
+  $('#stat-time').textContent = formatDuration(metrics.totalDurationMs);
+  $('#stat-longest').textContent = formatDuration(metrics.longestDurationMs);
+  $('#stat-average').textContent = formatDuration(metrics.averageDurationMs);
+  $('#stat-success').textContent = metrics.successCount.toLocaleString();
+  $('#stat-failed').textContent = metrics.failureCount.toLocaleString();
+  $('#stat-success-rate').textContent = `${metrics.successRate.toFixed(1)}%`;
+  $('#stat-failure-rate').textContent = `${metrics.failureRate.toFixed(1)}%`;
+  $('#stat-success-bar').style.width = `${metrics.successRate}%`;
+  $('#stat-failure-bar').style.width = `${metrics.failureRate}%`;
+  $('#outcome-bar').setAttribute('aria-label', `${metrics.successRate.toFixed(1)}% successful, ${metrics.failureRate.toFixed(1)}% failed; excluding cancelled and interrupted builds`);
+  $('#stat-outcome-total').textContent = `${metrics.successCount + metrics.failureCount} successful or failed builds`;
+  $('#stat-cancelled').textContent = `${metrics.cancelledCount} cancelled`;
+  $('#stat-interrupted').textContent = `${metrics.interruptedCount} interrupted`;
+  $('#stat-project').textContent = metrics.mostCompiledProject?.path || 'No builds yet';
+  $('#stat-project-count').textContent = `${metrics.mostCompiledProject?.count || 0} builds`;
+  $('#stats-updated').textContent = metrics.updatedAt ? `Updated ${timestamp(metrics.updatedAt)}` : 'No completed builds';
+}
+
 function renderQueue() {
   const active = state.builds.filter((build) => activeStates.has(build.status) || build.status === 'queued');
   const completed = state.builds.filter((build) => build.status === 'completed');
@@ -176,7 +213,12 @@ function renderQueue() {
   $('#success-count').textContent = completed.length;
   $('#failed-count').textContent = failed.length;
   const visible = filter === 'active' ? active : filter === 'completed' ? completed : state.builds;
-  $('#queue-list').innerHTML = visible.length ? visible.map((build) => `<article class="build-item ${build.id === selectedId ? 'selected' : ''} ${build.status}"><button class="build-select" data-build="${build.id}" aria-label="View ${escapeHtml(build.project)} ${labels[build.status]} build" aria-pressed="${build.id === selectedId}"><div class="build-item-top"><span class="build-item-icon ${build.status}"><i data-lucide="${statusIcons[build.status]}"></i></span><span class="build-project-name">${escapeHtml(build.project)}</span><span class="build-time" data-duration="${build.id}">${duration(build)}</span></div><div class="build-item-meta"><span class="build-label ${build.status}">${labels[build.status]}</span><span class="mono">#${build.id.slice(0, 8)}</span></div><div class="build-step" data-step="${build.id}" title="${escapeHtml(build.step)}">${escapeHtml(build.step)}</div>${activeStates.has(build.status) ? '<div class="queue-progress"><span></span></div>' : ''}</button>${build.artifact ? `<a class="artifact-link" href="/api/builds/${build.id}/artifact"><i data-lucide="download"></i> Download .bin <span>${(build.artifact.bytes / 1024).toFixed(1)} KB</span></a>` : ''}${build.status === 'queued' ? `<button class="cancel-queued" data-cancel="${build.id}" title="Cancel queued build" aria-label="Cancel queued ${escapeHtml(build.project)} build"><i data-lucide="x"></i></button>` : ''}</article>`).join('') : `<div class="queue-empty"><div class="empty-stack"><i data-lucide="${filter === 'all' ? 'layers-2' : 'list-filter'}"></i></div><h3>${filter === 'all' ? 'A clean slate.' : 'Nothing here. '}</h3><p>${filter === 'all' ? 'No builds in this workspace yet.' : `No ${filter} builds.`}</p><span class="mono">${filter === 'all' ? 'QUEUE IS EMPTY' : 'ALL CLEAR'}</span></div>`;
+  $('#queue-list').innerHTML = visible.length ? visible.map((build) => {
+    const name = escapeHtml(build.name || build.project);
+    const finished = !activeStates.has(build.status) && build.status !== 'queued';
+    const timing = `Started: ${build.startedAt || 'not started'}${build.finishedAt ? ` | Finished: ${build.finishedAt}` : ''}`;
+    return `<article class="build-item ${build.id === selectedId ? 'selected' : ''} ${build.status}"><button class="build-select" data-build="${build.id}" aria-label="View ${name} ${labels[build.status]} build" aria-pressed="${build.id === selectedId}"><div class="build-item-top"><span class="build-item-icon ${build.status}"><i data-lucide="${statusIcons[build.status]}"></i></span><span class="build-project-name" title="${name}">${name}</span></div><div class="build-item-meta"><span class="build-label ${build.status}">${labels[build.status]}</span><span class="mono">#${build.id.slice(0, 8)}</span><span class="build-time" data-duration="${build.id}">${duration(build)}</span></div><div class="build-timestamp" title="${escapeHtml(timing)}">${build.startedAt ? `<time datetime="${build.startedAt}">${escapeHtml(timestamp(build.startedAt))}</time>` : 'Not started'}</div><div class="build-step" data-step="${build.id}" title="${escapeHtml(build.step)}">${escapeHtml(build.step)}</div>${activeStates.has(build.status) ? '<div class="queue-progress"><span></span></div>' : ''}</button>${build.artifact ? `<a class="artifact-link" href="/api/builds/${build.id}/artifact"><i data-lucide="download"></i> Download .bin <span>${(build.artifact.bytes / 1024).toFixed(1)} KB</span></a>` : ''}${build.status === 'queued' ? `<button class="cancel-queued" data-cancel="${build.id}" title="Cancel queued build" aria-label="Cancel queued ${name} build"><i data-lucide="x"></i></button>` : ''}${finished ? `<button class="delete-build icon-button" data-delete="${build.id}" title="Delete build" aria-label="Delete ${name}"><i data-lucide="trash-2"></i></button>` : ''}</article>`;
+  }).join('') : `<div class="queue-empty"><div class="empty-stack"><i data-lucide="${filter === 'all' ? 'layers-2' : 'list-filter'}"></i></div><h3>${filter === 'all' ? 'A clean slate.' : 'Nothing here. '}</h3><p>${filter === 'all' ? 'No builds in this workspace yet.' : `No ${filter} builds.`}</p><span class="mono">${filter === 'all' ? 'QUEUE IS EMPTY' : 'ALL CLEAR'}</span></div>`;
   icons();
 }
 
@@ -193,7 +235,7 @@ async function loadLogs(id) {
     const result = await api(`/api/builds/${id}/logs`);
     mergeLogs(id, result.logs);
     if (selectedId === id) renderLogs();
-  } catch (error) { toast(error.message, true); }
+  } catch (error) { if (state.builds.some((build) => build.id === id)) toast(error.message, true); }
 }
 
 async function selectBuild(id) {
@@ -210,7 +252,7 @@ function renderTerminalHeading() {
   const running = build && activeStates.has(build.status);
   $('#terminal-status').textContent = build ? labels[build.status].toUpperCase() : 'STANDBY';
   $('#terminal-status').className = `build-status-badge ${build?.status || ''}`;
-  $('#terminal-project').textContent = build ? build.project : 'No build selected';
+  $('#terminal-project').textContent = build ? build.name || build.project : 'No build selected';
   $('#terminal-project').title = build?.path || '';
   $('#terminal-id').textContent = build ? `#${build.id.slice(0, 8)}` : 'SESSION / --';
   $('#stop-button').hidden = !running && build?.status !== 'queued';
@@ -255,17 +297,20 @@ async function updatePath(target) {
 $('#project-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   if (!connected || submitting) return;
+  const name = $('#build-name').value.trim();
+  if (!name) { $('#build-name').setCustomValidity('Enter a build name'); $('#build-name').reportValidity(); return; }
   const target = $('#project-path').value.trim();
   submitting = true;
   $('#compile-button').disabled = true;
   try {
     await updatePath(target);
-    const build = await api('/api/builds', 'POST', { path: target });
+    const build = await api('/api/builds', 'POST', { path: target, name });
     await selectBuild(build.id);
     toast('Build added to the queue');
   } catch (error) { toast(error.message, true); }
   finally { submitting = false; $('#compile-button').disabled = !connected; }
 });
+$('#build-name').addEventListener('input', () => $('#build-name').setCustomValidity(''));
 $('#project-path').addEventListener('change', async () => {
   try { await updatePath($('#project-path').value.trim()); }
   catch (error) { toast(error.message, true); $('#project-path').value = state.projectPath; }
@@ -277,10 +322,49 @@ async function cancelBuild(id) {
 }
 $('#stop-button').addEventListener('click', () => { if (selectedId) void cancelBuild(selectedId); });
 $('#queue-list').addEventListener('click', (event) => {
+  const remove = event.target.closest('[data-delete]');
   const cancel = event.target.closest('[data-cancel]');
   const build = event.target.closest('[data-build]');
-  if (cancel) void cancelBuild(cancel.dataset.cancel);
+  if (remove) {
+    deleteId = remove.dataset.delete;
+    const target = state.builds.find((item) => item.id === deleteId);
+    $('#delete-build-name').textContent = target?.name || target?.project || '';
+    $('#delete-modal').showModal();
+  } else if (cancel) void cancelBuild(cancel.dataset.cancel);
   else if (build) void selectBuild(build.dataset.build);
+});
+$('#close-delete').addEventListener('click', () => $('#delete-modal').close());
+$('#cancel-delete').addEventListener('click', () => $('#delete-modal').close());
+$('#confirm-delete').addEventListener('click', async () => {
+  if (!deleteId || !connected) return;
+  $('#confirm-delete').disabled = true;
+  try {
+    await api(`/api/builds/${deleteId}`, 'DELETE');
+    $('#delete-modal').close();
+    toast('Build deleted');
+  } catch (error) { toast(error.message, true); }
+  finally { $('#confirm-delete').disabled = !connected; }
+});
+
+function switchView(view) {
+  $$('[data-view]').forEach((tab) => {
+    const selected = tab.dataset.view === view;
+    tab.classList.toggle('selected', selected);
+    tab.setAttribute('aria-selected', selected);
+    tab.tabIndex = selected ? 0 : -1;
+  });
+  $('#dashboard-view').hidden = view !== 'dashboard';
+  $('#stats-view').hidden = view !== 'stats';
+}
+$$('[data-view]').forEach((tab) => {
+  tab.addEventListener('click', () => switchView(tab.dataset.view));
+  tab.addEventListener('keydown', (event) => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    const view = event.key === 'Home' ? 'dashboard' : event.key === 'End' ? 'stats' : tab.dataset.view === 'dashboard' ? 'stats' : 'dashboard';
+    switchView(view);
+    $(`#${view}-tab`).focus();
+  });
 });
 $$('[data-filter]').forEach((button) => button.addEventListener('click', () => {
   filter = button.dataset.filter;

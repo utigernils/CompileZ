@@ -81,10 +81,10 @@ test('shared paths, concurrent isolated builds, queue, cancellation, artifacts a
   await waitFor(() => states.length === 2, 'both socket snapshots');
   await request('/api/project', 'PUT', { path: second });
   await waitFor(() => states.every((state) => state.projectPath === second), 'shared project path');
-  const alpha = (await request('/api/builds', 'POST', { path: first })).body.id;
-  const beta = (await request('/api/builds', 'POST', { path: second })).body.id;
+  const alpha = (await request('/api/builds', 'POST', { path: first, name: 'Alpha release' })).body.id;
+  const beta = (await request('/api/builds', 'POST', { path: second, name: 'Beta release' })).body.id;
   await waitFor(() => states[1].builds.filter((build) => build.status === 'running').length === 2, 'concurrent builds');
-  const queued = (await request('/api/builds', 'POST', { path: first })).body.id;
+  const queued = (await request('/api/builds', 'POST', { path: first, name: 'Queued release' })).body.id;
   assert.equal(states[0].projectPath, second);
   await waitFor(() => states[0].builds.find((build) => build.id === queued)?.status === 'queued');
   await request(`/api/builds/${queued}/cancel`, 'POST');
@@ -98,11 +98,11 @@ test('shared paths, concurrent isolated builds, queue, cancellation, artifacts a
   assert.equal(await (await fetch(`${base}/api/builds/${alpha}/artifact`)).text(), 'alpha');
   assert.equal(await (await fetch(`${base}/api/builds/${beta}/artifact`)).text(), 'beta');
   assert.ok(logs.some((entry) => entry.buildId === alpha));
-  const failure = (await request('/api/builds', 'POST', { path: bad })).body.id;
+  const failure = (await request('/api/builds', 'POST', { path: bad, name: 'Failure test' })).body.id;
   await waitFor(() => states[0].builds.find((build) => build.id === failure)?.status === 'failed');
   assert.equal(states[0].builds.find((build) => build.id === failure).exitCode, 9);
   await fs.writeFile(path.join(second, 'compile.sh'), 'echo waiting\nsleep 30\n');
-  const cancelled = (await request('/api/builds', 'POST', { path: second })).body.id;
+  const cancelled = (await request('/api/builds', 'POST', { path: second, name: 'Cancel test' })).body.id;
   await waitFor(() => logs.some((entry) => entry.buildId === cancelled && entry.entry.text.includes('waiting')));
   await request(`/api/builds/${cancelled}/cancel`, 'POST');
   await waitFor(() => states[1].builds.find((build) => build.id === cancelled)?.status === 'cancelled');
@@ -124,7 +124,7 @@ test('same-project jobs serialize, choose fresh firmware, retain snapshots and r
   let address = await server.listen(0, '127.0.0.1');
   let base = `http://127.0.0.1:${address.port}`;
   context.after(async () => { await server.close(); await fs.rm(root, { recursive: true, force: true }); });
-  const submit = async () => (await (await fetch(`${base}/api/builds`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).json()).id;
+  const submit = async () => (await (await fetch(`${base}/api/builds`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Firmware release' }) })).json()).id;
   const first = await submit();
   const second = await submit();
   const snapshot = await (await fetch(`${base}/api/state`)).json();
@@ -178,11 +178,104 @@ test('missing compiler executable fails the build without stopping the server', 
     await server.close();
     await fs.rm(root, { recursive: true, force: true });
   });
-  const build = await (await fetch(`${base}/api/builds`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).json();
+  const build = await (await fetch(`${base}/api/builds`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Missing compiler' }) })).json();
   const result = await waitFor(async () => {
     const state = await (await fetch(`${base}/api/state`)).json();
     return state.builds.find((item) => item.id === build.id && item.status === 'failed');
   });
   assert.equal(result.step, 'Build failed (ENOENT)');
   assert.equal((await fetch(`${base}/api/state`)).status, 200);
+});
+
+test('required names, timestamps, synced deletion and all-time statistics survive a restart', async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'compilez-stats-'));
+  const first = path.join(root, 'firmware');
+  const broken = path.join(root, 'broken');
+  const dataDir = path.join(root, 'data');
+  await fs.mkdir(first);
+  await fs.mkdir(broken);
+  await fs.writeFile(path.join(first, 'compile.sh'), 'echo building\nsleep 0.3\nprintf binary > firmware.bin\n');
+  await fs.writeFile(path.join(broken, 'compile.sh'), 'echo failed >&2\nexit 4\n');
+  const options = { roots: [root], initialPath: first, dataDir, hardware: false };
+  let server = await createCompileZ(options);
+  let address = await server.listen(0, '127.0.0.1');
+  let base = `http://127.0.0.1:${address.port}`;
+  const clients = [io(base), io(base)];
+  const states = [];
+  clients.forEach((client, index) => client.on('state', (state) => { states[index] = state; }));
+  context.after(async () => { clients.forEach((client) => client.disconnect()); await server.close(); await fs.rm(root, { recursive: true, force: true }); });
+  const request = async (url, method = 'GET', body) => {
+    const response = await fetch(`${base}${url}`, { method, headers: { 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) });
+    return { status: response.status, body: await response.json() };
+  };
+  await waitFor(() => states.length === 2);
+  for (const name of [undefined, '', '   ', 'x'.repeat(101), 'bad\nname']) {
+    assert.equal((await request('/api/builds', 'POST', { path: first, name })).status, 400);
+  }
+  assert.equal((await request('/api/state')).body.builds.length, 0);
+  const release = (await request('/api/builds', 'POST', { path: first, name: ' Release <v1> ' })).body.id;
+  await waitFor(() => states[0].builds.find((build) => build.id === release)?.status === 'running');
+  assert.equal(states[0].builds.find((build) => build.id === release).name, 'Release <v1>');
+  assert.equal((await request(`/api/builds/${release}`, 'DELETE')).status, 409);
+  const queued = (await request('/api/builds', 'POST', { path: first, name: 'Queued build' })).body.id;
+  assert.equal((await request(`/api/builds/${queued}`, 'DELETE')).status, 409);
+  await request(`/api/builds/${queued}/cancel`, 'POST');
+  const failure = (await request('/api/builds', 'POST', { path: broken, name: 'Failure test' })).body.id;
+  await waitFor(() => states.every((state) => state.buildStatistics.totalBuilds === 3), 'all clients receive cumulative statistics');
+  const build = states[0].builds.find((item) => item.id === release);
+  assert.equal(build.status, 'completed');
+  assert.ok(Date.parse(build.finishedAt) >= Date.parse(build.startedAt));
+  assert.equal(build.durationMs, Date.parse(build.finishedAt) - Date.parse(build.startedAt));
+  const metrics = (await request('/api/stats')).body;
+  assert.equal(metrics.totalBuilds, 3);
+  assert.equal(metrics.successCount, 1);
+  assert.equal(metrics.failureCount, 1);
+  assert.equal(metrics.cancelledCount, 1);
+  assert.equal(metrics.successRate, 50);
+  assert.equal(metrics.failureRate, 50);
+  assert.equal(metrics.mostCompiledProject.path, first);
+  assert.equal(metrics.mostCompiledProject.count, 2);
+  assert.ok(metrics.totalDurationMs >= build.durationMs);
+  assert.ok(metrics.longestDurationMs >= build.durationMs);
+  assert.equal(metrics.averageDurationMs, metrics.totalDurationMs / 3);
+  assert.equal((await request(`/api/builds/${release}`, 'DELETE')).status, 200);
+  assert.equal((await request(`/api/builds/${failure}`, 'DELETE')).status, 200);
+  await waitFor(() => states.every((state) => state.builds.length === 1), 'deletion broadcast to both clients');
+  assert.equal((await fetch(`${base}/api/builds/${release}/artifact`)).status, 404);
+  assert.equal((await request(`/api/builds/${release}/logs`)).status, 404);
+  assert.equal((await request('/api/stats')).body.totalBuilds, 3);
+  assert.equal(JSON.parse(await fs.readFile(path.join(dataDir, 'stats.json'), 'utf8')).totalBuilds, 3);
+  assert.equal(JSON.parse(await fs.readFile(path.join(dataDir, 'history.json'), 'utf8')).builds.length, 1);
+  clients.forEach((client) => client.disconnect());
+  await server.close();
+  server = await createCompileZ(options);
+  address = await server.listen(0, '127.0.0.1');
+  base = `http://127.0.0.1:${address.port}`;
+  assert.deepEqual((await request('/api/stats')).body, metrics);
+  assert.equal((await request('/api/state')).body.builds.length, 1);
+});
+
+test('statistics migrate existing history once, including interrupted builds', async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'compilez-migrate-'));
+  const dataDir = path.join(root, 'data');
+  await fs.mkdir(dataDir);
+  await fs.writeFile(path.join(dataDir, 'history.json'), JSON.stringify({ projectPath: root, builds: [
+    { id: 'legacy-success', project: 'legacy', path: root, status: 'completed', startedAt: '2026-10-01T10:00:00.000Z', finishedAt: '2026-10-01T10:00:02.500Z', logs: [], logSequence: 0 },
+    { id: 'legacy-active', project: 'legacy', path: root, status: 'running', startedAt: new Date().toISOString(), finishedAt: null, logs: [], logSequence: 0 }
+  ] }));
+  const options = { roots: [root], initialPath: root, dataDir, hardware: false };
+  let server = await createCompileZ(options);
+  let address = await server.listen(0, '127.0.0.1');
+  context.after(async () => { await server.close(); await fs.rm(root, { recursive: true, force: true }); });
+  const state = await (await fetch(`http://127.0.0.1:${address.port}/api/state`)).json();
+  assert.equal(state.builds[0].name, 'legacy');
+  assert.equal(state.buildStatistics.totalBuilds, 2);
+  assert.equal(state.buildStatistics.successCount, 1);
+  assert.equal(state.buildStatistics.interruptedCount, 1);
+  assert.ok(state.buildStatistics.totalDurationMs >= 2500);
+  await server.close();
+  server = await createCompileZ(options);
+  address = await server.listen(0, '127.0.0.1');
+  const restored = await (await fetch(`http://127.0.0.1:${address.port}/api/stats`)).json();
+  assert.equal(restored.totalBuilds, 2);
 });

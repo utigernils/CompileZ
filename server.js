@@ -32,11 +32,14 @@ export async function createCompileZ(options = {}) {
   let projectPath = await validDirectory(initialPath);
   let stats = { cpu: null, temperature: null, memoryUsed: null, memoryTotal: null, cores: os.cpus().length, hostname: os.hostname(), updatedAt: null };
   let closing = false;
+  let finishingBuilds = 0;
   let statsBusy = false;
   let persistTimer;
   let persistQueue = Promise.resolve();
   let configQueue = Promise.resolve();
   let configVersion = 0;
+  let statisticsQueue = Promise.resolve();
+  let buildStatistics = { schemaVersion: 1, totalBuilds: 0, totalDurationMs: 0, longestDurationMs: 0, successCount: 0, failureCount: 0, cancelledCount: 0, interruptedCount: 0, projects: {}, recentBuildIds: [], updatedAt: null };
 
   await fs.mkdir(path.join(dataDir, 'artifacts'), { recursive: true });
   try {
@@ -53,6 +56,20 @@ export async function createCompileZ(options = {}) {
   } catch (error) {
     if (error.code !== 'ENOENT') console.warn('History could not be restored:', error.message);
   }
+  try {
+    const saved = JSON.parse(await fs.readFile(path.join(dataDir, 'stats.json'), 'utf8'));
+    const counters = ['totalBuilds', 'totalDurationMs', 'longestDurationMs', 'successCount', 'failureCount', 'cancelledCount', 'interruptedCount'];
+    if (saved.schemaVersion !== 1 || !counters.every((key) => Number.isFinite(saved[key]) && saved[key] >= 0) || !saved.projects || !Array.isArray(saved.recentBuildIds)) throw new Error('Invalid statistics format');
+    buildStatistics = saved;
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw new Error(`Cannot load stats.json; preserve and repair this file before restarting: ${error.message}`);
+  }
+  for (const build of builds) {
+    build.name ||= build.project;
+    build.durationMs = buildDuration(build);
+    recordBuildStatistics(build);
+  }
+  await persistStatistics();
 
   function authorized(request) {
     if (!token) return true;
@@ -94,7 +111,49 @@ export async function createCompileZ(options = {}) {
   }
 
   function snapshot() {
-    return { projectPath, builds: builds.map(({ logs, logSequence, ...build }) => build), stats, maxConcurrent, roots };
+    return { projectPath, builds: builds.map(({ logs, logSequence, statisticsRecorded, ...build }) => build), stats, buildStatistics: statisticsSnapshot(), maxConcurrent, roots };
+  }
+
+  function buildDuration(build) {
+    return build.startedAt && build.finishedAt ? Math.max(0, Date.parse(build.finishedAt) - Date.parse(build.startedAt)) || 0 : 0;
+  }
+
+  function statisticsSnapshot() {
+    const { projects, recentBuildIds, ...summary } = buildStatistics;
+    const mostCompiled = Object.entries(projects).sort((first, second) => second[1] - first[1] || first[0].localeCompare(second[0]))[0];
+    const outcomes = summary.successCount + summary.failureCount;
+    return { ...summary, averageDurationMs: summary.totalBuilds ? summary.totalDurationMs / summary.totalBuilds : 0, successRate: outcomes ? summary.successCount / outcomes * 100 : 0, failureRate: outcomes ? summary.failureCount / outcomes * 100 : 0, mostCompiledProject: mostCompiled ? { path: mostCompiled[0], count: mostCompiled[1] } : null };
+  }
+
+  function recordBuildStatistics(build) {
+    const counter = { completed: 'successCount', failed: 'failureCount', cancelled: 'cancelledCount', interrupted: 'interruptedCount' }[build.status];
+    if (!counter || build.statisticsRecorded || buildStatistics.recentBuildIds.includes(build.id)) return;
+    build.durationMs = buildDuration(build);
+    buildStatistics.totalBuilds++;
+    buildStatistics[counter]++;
+    buildStatistics.totalDurationMs += build.durationMs;
+    buildStatistics.longestDurationMs = Math.max(buildStatistics.longestDurationMs, build.durationMs);
+    buildStatistics.projects[build.path] = (buildStatistics.projects[build.path] || 0) + 1;
+    buildStatistics.updatedAt = new Date().toISOString();
+    buildStatistics.recentBuildIds.push(build.id);
+    buildStatistics.recentBuildIds = buildStatistics.recentBuildIds.slice(-128);
+    build.statisticsRecorded = true;
+  }
+
+  function persistStatistics() {
+    const saved = JSON.stringify(buildStatistics);
+    statisticsQueue = statisticsQueue.catch(() => {}).then(async () => {
+      const temporary = path.join(dataDir, 'stats.tmp');
+      await fs.writeFile(temporary, saved);
+      await fs.rename(temporary, path.join(dataDir, 'stats.json'));
+    });
+    return statisticsQueue;
+  }
+
+  async function completeStatistics(build) {
+    recordBuildStatistics(build);
+    try { await persistStatistics(); }
+    catch (error) { console.error('Statistics save failed:', error.message); }
   }
 
   function configTask(task) {
@@ -136,7 +195,7 @@ export async function createCompileZ(options = {}) {
   function publish() {
     io.emit('state', snapshot());
     clearTimeout(persistTimer);
-    persistTimer = setTimeout(() => persist().catch((error) => console.error('History save failed:', error.message)), 300);
+    if (!closing) persistTimer = setTimeout(() => persist().catch((error) => console.error('History save failed:', error.message)), 300);
   }
 
   function appendLog(build, text, stream = 'stdout') {
@@ -196,6 +255,7 @@ export async function createCompileZ(options = {}) {
     const finish = async (code, signal, error) => {
       if (finalized) return;
       finalized = true;
+      finishingBuilds++;
       const record = processes.get(build.id);
       clearTimeout(record?.killTimer);
       if (child) signalGroup(child, 'SIGKILL');
@@ -225,7 +285,9 @@ export async function createCompileZ(options = {}) {
       build.step = cancelled ? 'Build cancelled' : build.status === 'completed' ? 'Build completed successfully' : `Build failed (${error?.code || signal || code})`;
       appendLog(build, `${build.step}\n`, 'system');
       processes.delete(build.id);
+      await completeStatistics(build);
       publish();
+      finishingBuilds--;
       pump();
     };
     try {
@@ -263,6 +325,7 @@ export async function createCompileZ(options = {}) {
 
   const route = (handler) => (request, response, next) => Promise.resolve(handler(request, response)).catch(next);
   app.get('/api/state', (_request, response) => response.json(snapshot()));
+  app.get('/api/stats', (_request, response) => response.json(statisticsSnapshot()));
   app.get('/api/directories', route(async (request, response) => {
     const directory = await validDirectory(request.query.path || projectPath);
     const entries = await fs.readdir(directory, { withFileTypes: true });
@@ -303,10 +366,12 @@ export async function createCompileZ(options = {}) {
   }));
   app.post('/api/builds', route(async (request, response) => {
     if (closing) return response.status(503).json({ error: 'Server is shutting down' });
+    const name = typeof request.body.name === 'string' ? request.body.name.trim() : '';
+    if (!name || name.length > 100 || /[\x00-\x1f\x7f]/.test(name)) return response.status(400).json({ error: 'Enter a build name of 1 to 100 characters without control characters' });
     const directory = await validDirectory(request.body.path || projectPath);
     await commandFor(directory);
     if (builds.filter((build) => activeStatuses.has(build.status) || build.status === 'queued').length >= 32) return response.status(429).json({ error: 'The build queue is full' });
-    const build = { id: randomUUID(), project: path.basename(directory), path: directory, status: 'queued', createdAt: new Date().toISOString(), startedAt: null, finishedAt: null, step: 'Waiting for an available worker', progress: null, logs: [], logSequence: 0, artifact: null };
+    const build = { id: randomUUID(), name, project: path.basename(directory), path: directory, status: 'queued', createdAt: new Date().toISOString(), startedAt: null, finishedAt: null, durationMs: 0, step: 'Waiting for an available worker', progress: null, logs: [], logSequence: 0, artifact: null };
     builds.unshift(build);
     while (builds.length > 50) {
       const removable = builds.findLastIndex((item) => !activeStatuses.has(item.status) && item.status !== 'queued');
@@ -318,13 +383,14 @@ export async function createCompileZ(options = {}) {
     pump();
     response.status(202).json({ id: build.id });
   }));
-  app.post('/api/builds/:id/cancel', (request, response) => {
+  app.post('/api/builds/:id/cancel', route(async (request, response) => {
     const build = builds.find((item) => item.id === request.params.id);
     if (!build) return response.status(404).json({ error: 'Build not found' });
     if (build.status === 'queued') {
       build.status = 'cancelled';
       build.finishedAt = new Date().toISOString();
       build.step = 'Cancelled before starting';
+      await completeStatistics(build);
     } else if (build.status === 'running') {
       build.status = 'cancelling';
       build.step = 'Stopping compiler process group';
@@ -338,7 +404,20 @@ export async function createCompileZ(options = {}) {
     publish();
     pump();
     response.json({ status: build.status });
-  });
+  }));
+  app.delete('/api/builds/:id', route(async (request, response) => {
+    const index = builds.findIndex((build) => build.id === request.params.id);
+    if (index < 0) return response.status(404).json({ error: 'Build not found' });
+    const build = builds[index];
+    if (activeStatuses.has(build.status) || build.status === 'queued' || processes.has(build.id)) return response.status(409).json({ error: 'Only finished builds can be deleted' });
+    await fs.unlink(path.join(dataDir, 'artifacts', `${build.id}.bin`)).catch((error) => { if (error.code !== 'ENOENT') throw error; });
+    const currentIndex = builds.indexOf(build);
+    if (currentIndex < 0) return response.status(404).json({ error: 'Build already deleted' });
+    builds.splice(currentIndex, 1);
+    await persist();
+    publish();
+    response.json({ id: build.id });
+  }));
   app.get('/api/builds/:id/logs', (request, response) => {
     const build = builds.find((item) => item.id === request.params.id);
     if (!build) return response.status(404).json({ error: 'Build not found' });
@@ -390,11 +469,12 @@ export async function createCompileZ(options = {}) {
           resolve();
         }, 2800);
         const poll = setInterval(() => {
-          if (!processes.size) { clearInterval(poll); clearTimeout(deadline); resolve(); }
+          if (!processes.size && !finishingBuilds) { clearInterval(poll); clearTimeout(deadline); resolve(); }
         }, 30);
       });
       await new Promise((resolve) => io.close(resolve));
       await persist();
+      await persistStatistics();
     }
   };
 }

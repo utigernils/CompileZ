@@ -15,7 +15,7 @@ Open **http://localhost:3000** or **http://<server-LAN-IP>:3000**. The included 
 
 ## Build your project
 
-Browse the **server's** filesystem or enter an absolute path. Paths are validated against `BROWSE_ROOTS`, including symlink resolution. Pressing Enter in the project input starts a build. The path is synchronized when committed by changing focus, selecting a directory, or submitting a build. A remote path update is authoritative, including while another client is editing.
+Browse the **server's** filesystem or enter an absolute path, then enter a required **Build name** before clicking Compile. Names are trimmed and limited to 100 characters. The server also rejects missing names, including requests sent outside the UI. Pressing Enter submits the same validated form. Paths are validated against `BROWSE_ROOTS`, including symlink resolution. The path is synchronized when committed by changing focus, selecting a directory, or submitting a build. A remote path update is authoritative, including while another client is editing.
 
 - A project with `platformio.ini` runs `pio run` (takes precedence).
 - Otherwise a project with `compile.sh` runs `/bin/bash compile.sh` in that directory.
@@ -24,6 +24,16 @@ Browse the **server's** filesystem or enter an absolute path. Paths are validate
 - Two workers run concurrently by default. Each build snapshots its project directory at submission. Builds for the **same canonical directory** are serialized to prevent shared output collisions; different directories run in parallel.
 - Stop terminates only that build's process group with `SIGTERM`, escalating to `SIGKILL` after 2.5 seconds. Cancelling a queued build does not affect a worker.
 - Output is kept per build and streamed independently. Selecting a build changes only your local terminal view. A reconnect retrieves the latest shared state and the selected build's log tail.
+- History shows the custom name, local start timestamp, and elapsed duration. Exact start/end timestamps are stored as UTC ISO timestamps and available in the timestamp tooltip and state API. Queued builds show "Not started" until a worker starts them.
+- The trash icon deletes a finished build after confirmation, removing its logs and copied firmware from all clients. Running and queued builds cannot be deleted; cancel them first. Deleting history never subtracts from all-time statistics.
+
+### All-time statistics
+
+The **Dashboard** and **Stats** tabs switch your local view without interrupting builds. Every client receives updated global statistics when builds finish. Metrics include total builds, cumulative build time, longest and average build time, successful/failed counts and percentages, and the most compiled canonical project directory.
+
+Statistics are written atomically to `stats.json` in `DATA_DIR` (normally `.data/stats.json`, or `/var/lib/compilez/stats.json` under systemd). This file is independent of the 50-entry history, so totals survive history deletion, pruning, and restart. On first upgrade, retained finished history is imported once; builds that were already deleted or pruned before this feature cannot be recovered. Old entries use their project name until new named builds are submitted.
+
+Total builds counts finished attempts, including cancelled and interrupted builds. Time excludes queue wait and sums each attempt's start-to-finish elapsed time; a build cancelled before starting contributes zero time. Average time is cumulative time divided by total finished attempts. Success/failure percentages use only successful and failed attempts, with cancelled/interrupted counts shown separately. Interrupted builds use the recovery timestamp as their recorded end because the exact interruption time cannot be recovered after an abrupt outage. The most compiled project counts finished attempts, with ties resolved by path order. Malformed statistics files stop startup rather than silently resetting all-time data; preserve and repair the file if that happens.
 
 ### Edit compiler config
 
