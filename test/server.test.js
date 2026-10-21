@@ -48,16 +48,16 @@ test('config reads, atomic saves, broadcasts, conflicts and filesystem boundarie
   const competing = await Promise.all(['one', 'two'].map((text) => request('/api/config', 'PUT', { path: first, content: text, revision: saved.body.revision })));
   assert.deepEqual(competing.map((result) => result.status).sort(), [200, 409]);
   await request('/api/project', 'PUT', { path: second });
-  assert.equal((await request('/api/config')).body.content, '');
+  assert.equal((await request(`/api/config?path=${encodeURIComponent(second)}`)).body.content, '');
   assert.equal((await request(`/api/config?path=${encodeURIComponent(first)}`)).body.exists, true);
   assert.equal((await request('/api/config', 'PUT', { path: second, content: 'x'.repeat(65_537), revision: 'missing' })).status, 400);
   assert.equal((await request('/api/config', 'PUT', { path: '/etc', content: 'no', revision: 'missing' })).status, 400);
   await fs.symlink(path.join(first, 'platformio.ini'), path.join(second, 'platformio.ini'));
-  assert.equal((await request('/api/config')).status, 400);
+  assert.equal((await request(`/api/config?path=${encodeURIComponent(second)}`)).status, 400);
   assert.equal((await request('/api/config', 'PUT', { path: second, content: 'no', revision: 'missing' })).status, 400);
 });
 
-test('shared paths, concurrent isolated builds, queue, cancellation, artifacts and failures', async (context) => {
+test('independent selections, concurrent isolated builds, queue, cancellation, artifacts and failures', async (context) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'compilez-'));
   const first = path.join(root, 'alpha');
   const second = path.join(root, 'beta');
@@ -80,12 +80,12 @@ test('shared paths, concurrent isolated builds, queue, cancellation, artifacts a
   };
   await waitFor(() => states.length === 2, 'both socket snapshots');
   await request('/api/project', 'PUT', { path: second });
-  await waitFor(() => states.every((state) => state.projectPath === second), 'shared project path');
+  assert.ok(states.every((state) => state.projectPath === undefined && state.defaultProjectPath === first));
   const alpha = (await request('/api/builds', 'POST', { path: first, name: 'Alpha release' })).body.id;
   const beta = (await request('/api/builds', 'POST', { path: second, name: 'Beta release' })).body.id;
   await waitFor(() => states[1].builds.filter((build) => build.status === 'running').length === 2, 'concurrent builds');
   const queued = (await request('/api/builds', 'POST', { path: first, name: 'Queued release' })).body.id;
-  assert.equal(states[0].projectPath, second);
+  assert.equal(states[0].projectPath, undefined);
   await waitFor(() => states[0].builds.find((build) => build.id === queued)?.status === 'queued');
   await request(`/api/builds/${queued}/cancel`, 'POST');
   await waitFor(() => states[1].builds.find((build) => build.id === queued)?.status === 'cancelled');
@@ -109,7 +109,7 @@ test('shared paths, concurrent isolated builds, queue, cancellation, artifacts a
   assert.equal((await request('/api/project', 'PUT', { path: '/etc' })).status, 400);
   await fs.symlink('/etc', path.join(root, 'escape'));
   assert.equal((await request(`/api/directories?path=${encodeURIComponent(path.join(root, 'escape'))}`)).status, 400);
-  assert.equal((await request('/api/directories')).body.path, second);
+  assert.equal((await request(`/api/directories?path=${encodeURIComponent(second)}`)).body.path, second);
 });
 
 test('same-project jobs serialize, choose fresh firmware, retain snapshots and restore history', async (context) => {
@@ -124,7 +124,7 @@ test('same-project jobs serialize, choose fresh firmware, retain snapshots and r
   let address = await server.listen(0, '127.0.0.1');
   let base = `http://127.0.0.1:${address.port}`;
   context.after(async () => { await server.close(); await fs.rm(root, { recursive: true, force: true }); });
-  const submit = async () => (await (await fetch(`${base}/api/builds`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Firmware release' }) })).json()).id;
+  const submit = async () => (await (await fetch(`${base}/api/builds`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: project, name: 'Firmware release' }) })).json()).id;
   const first = await submit();
   const second = await submit();
   const snapshot = await (await fetch(`${base}/api/state`)).json();
@@ -264,7 +264,7 @@ test('missing compiler executable fails the build without stopping the server', 
     await server.close();
     await fs.rm(root, { recursive: true, force: true });
   });
-  const build = await (await fetch(`${base}/api/builds`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Missing compiler' }) })).json();
+  const build = await (await fetch(`${base}/api/builds`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: root, name: 'Missing compiler' }) })).json();
   const result = await waitFor(async () => {
     const state = await (await fetch(`${base}/api/state`)).json();
     return state.builds.find((item) => item.id === build.id && item.status === 'failed');
@@ -327,7 +327,7 @@ test('required names, timestamps, synced deletion and all-time statistics surviv
   assert.equal((await request(`/api/builds/${release}`, 'DELETE')).status, 200);
   assert.equal((await request(`/api/builds/${failure}`, 'DELETE')).status, 200);
   await waitFor(() => states.every((state) => state.builds.length === 1), 'deletion broadcast to both clients');
-  assert.equal((await fetch(`${base}/api/builds/${release}/artifact`)).status, 404);
+  assert.equal(await (await fetch(`${base}/api/builds/${release}/artifact`)).text(), 'binary');
   assert.equal((await request(`/api/builds/${release}/logs`)).status, 404);
   assert.equal((await request('/api/stats')).body.totalBuilds, 3);
   assert.equal(JSON.parse(await fs.readFile(path.join(dataDir, 'stats.json'), 'utf8')).totalBuilds, 3);
@@ -364,4 +364,92 @@ test('statistics migrate existing history once, including interrupted builds', a
   address = await server.listen(0, '127.0.0.1');
   const restored = await (await fetch(`http://127.0.0.1:${address.port}/api/stats`)).json();
   assert.equal(restored.totalBuilds, 2);
+});
+
+test('PlatformIO always cleans before building and archives each result after history deletion', async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'compilez-clean-'));
+  const project = path.join(root, 'firmware');
+  const dataDir = path.join(root, 'data');
+  await fs.mkdir(project);
+  await fs.writeFile(path.join(project, 'platformio.ini'), '[env:esp32dev]\nboard = esp32dev\n');
+  const executable = path.join(root, 'pio-mock.mjs');
+  await fs.writeFile(executable, `#!${process.execPath}
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, utimesSync } from 'node:fs';
+const args = process.argv.slice(2);
+appendFileSync('commands.log', args.join(' ') + '\\n');
+if (args.includes('clean')) {
+  if (existsSync('fail-clean')) process.exit(8);
+  rmSync('.pio/build', { recursive: true, force: true });
+} else {
+  if (existsSync('.pio/build/esp32dev/firmware.bin')) process.exit(9);
+  const count = Number(existsSync('run-count') ? readFileSync('run-count', 'utf8') : 0) + 1;
+  writeFileSync('run-count', String(count));
+  mkdirSync('.pio/build/esp32dev', { recursive: true });
+  writeFileSync('.pio/build/esp32dev/firmware.bin', 'firmware-' + count);
+  utimesSync('.pio/build/esp32dev/firmware.bin', 0, 0);
+  console.log('compiled-' + count);
+}
+`);
+  await fs.chmod(executable, 0o755);
+  const previous = process.env.PIO_COMMAND;
+  process.env.PIO_COMMAND = executable;
+  const options = { roots: [root], initialPath: project, dataDir, hardware: false };
+  let server = await createCompileZ(options);
+  let address = await server.listen(0, '127.0.0.1');
+  let base = `http://127.0.0.1:${address.port}`;
+  context.after(async () => {
+    if (previous === undefined) delete process.env.PIO_COMMAND;
+    else process.env.PIO_COMMAND = previous;
+    await server.close();
+    await fs.rm(root, { recursive: true, force: true });
+  });
+  const submit = async (name) => {
+    const response = await fetch(`${base}/api/builds`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: project, name }) });
+    assert.equal(response.status, 202);
+    return (await response.json()).id;
+  };
+  const ids = await Promise.all([submit('First'), submit('Second')]);
+  await waitFor(async () => (await (await fetch(`${base}/api/stats`)).json()).totalBuilds === 2);
+  assert.deepEqual((await fs.readFile(path.join(project, 'commands.log'), 'utf8')).trim().split('\n'), ['run --target clean', 'run', 'run --target clean', 'run']);
+  const binaries = await Promise.all(ids.map(async (id) => (await fetch(`${base}/api/builds/${id}/artifact`)).text()));
+  assert.deepEqual(binaries.sort(), ['firmware-1', 'firmware-2']);
+  for (const id of ids) assert.equal((await fetch(`${base}/api/builds/${id}`, { method: 'DELETE' })).status, 200);
+  const archived = await (await fetch(`${base}/api/artifacts`)).json();
+  assert.equal(archived.length, 2);
+  assert.deepEqual(archived.map((artifact) => artifact.buildName).sort(), ['First', 'Second']);
+  assert.equal((await fetch(`${base}/api/builds/${ids[0]}/artifact`)).status, 200);
+  await server.close();
+  server = await createCompileZ(options);
+  address = await server.listen(0, '127.0.0.1');
+  base = `http://127.0.0.1:${address.port}`;
+  assert.equal((await (await fetch(`${base}/api/artifacts`)).json()).length, 2);
+  assert.equal((await fetch(`${base}/api/builds/${ids[1]}/artifact`)).status, 200);
+  await fs.writeFile(path.join(project, 'fail-clean'), '1');
+  const failed = await submit('Clean failure');
+  await waitFor(async () => (await (await fetch(`${base}/api/state`)).json()).builds.find((build) => build.id === failed)?.status === 'failed');
+  assert.equal((await fs.readFile(path.join(project, 'commands.log'), 'utf8')).trim().split('\n').at(-1), 'run --target clean');
+  assert.equal(await fs.readFile(path.join(project, 'run-count'), 'utf8'), '2');
+});
+
+test('firmware archives survive automatic history pruning', async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'compilez-retention-'));
+  const dataDir = path.join(root, 'data');
+  await fs.writeFile(path.join(root, 'compile.sh'), 'printf preserved > firmware.bin\n');
+  const server = await createCompileZ({ roots: [root], initialPath: root, dataDir, hardware: false });
+  const address = await server.listen(0, '127.0.0.1');
+  const base = `http://127.0.0.1:${address.port}`;
+  context.after(async () => { await server.close(); await fs.rm(root, { recursive: true, force: true }); });
+  let firstId;
+  for (let index = 0; index < 51; index++) {
+    const response = await fetch(`${base}/api/builds`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: root, name: `Retention ${index}` }) });
+    assert.equal(response.status, 202);
+    const { id } = await response.json();
+    firstId ||= id;
+    await waitFor(async () => (await (await fetch(`${base}/api/state`)).json()).builds.find((build) => build.id === id)?.status === 'completed');
+  }
+  const state = await (await fetch(`${base}/api/state`)).json();
+  assert.equal(state.builds.length, 50);
+  assert.ok(!state.builds.some((build) => build.id === firstId));
+  assert.equal(await (await fetch(`${base}/api/builds/${firstId}/artifact`)).text(), 'preserved');
+  assert.equal((await (await fetch(`${base}/api/artifacts`)).json()).length, 51);
 });

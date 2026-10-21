@@ -285,6 +285,16 @@ h1 { margin: 13px 0 5px; font-size: 34px; line-height: 1.2; font-weight: 500; }
 .outcome-metric > .mono { font-size: 11px; min-width: 52px; text-align: right; }
 .stats-other { display: flex; gap: 20px; color: #849578; font-size: 11px; margin-top: 24px; }
 .project-stat > p { font-size: 13px; color: #b8cda7; margin: 20px 0 0; overflow-wrap: anywhere; }
+.firmware-archive { padding: 30px 0; }
+.firmware-archive h2 > .mono { font-size: 10px; }
+.firmware-list { margin-top: 15px; max-height: 430px; overflow-y: auto; scrollbar-width: thin; }
+.firmware-item { display: flex; align-items: center; gap: 15px; padding: 15px 0; border-bottom: 1px solid var(--line); }
+.firmware-item > div { min-width: 0; flex: 1; }
+.firmware-item strong { font-size: 12px; font-weight: 500; overflow-wrap: anywhere; }
+.firmware-item p { font-size: 10px; line-height: 1.7; color: #90a583; overflow-wrap: anywhere; margin: 6px 0; }
+.firmware-item span, .archive-empty { font-size: 10px; color: #809475; }
+.archive-download { display: flex; align-items: center; gap: 7px; color: var(--green); font: 11px var(--mono); padding: 10px 5px; flex-shrink: 0; }
+.archive-download svg { width: 15px; height: 15px; }
 @media (min-width: 1001px) { .content-grid { align-items: stretch; } .queue-panel { height: 100%; } .queue-list { height: 0; max-height: none; } }
 @media (max-width: 1000px) { .queue-list { flex: none; height: auto; min-height: 220px; max-height: 480px; } .stats-overview { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 28px 0; } .stat-measure:nth-child(3) { padding-left: 0; } .stat-measure:nth-child(2) { border: 0; } }
 @media (max-width: 650px) { .project-controls { grid-template-columns: minmax(0, 1fr) auto; } .path-field { grid-column: 1 / -1; } .build-name-field { height: 44px; } .compile-button { width: auto; height: 44px; min-width: 122px; } .stats-updated { font-size: 8px; text-align: right; } .stat-measure { padding-right: 12px; padding-left: 17px; } .stat-measure strong { font-size: 25px; } .stat-measure > span { font-size: 10px; gap: 5px; } .stats-section-heading { align-items: flex-start; } .stats-section-heading > .mono { font-size: 8px; text-align: right; } .outcome-grid { grid-template-columns: 1fr; gap: 18px; } .project-stat > p { font-size: 11px; } }

@@ -1,6 +1,6 @@
 # CompileZ
 
-A shared, self-hosted firmware build station for a local-network Intel NUC. Express runs the compiler processes; Socket.IO synchronizes the project path, queue, build status, per-build output, and hardware telemetry. The vanilla frontend uses locally compiled Tailwind CSS, Lucide icons, Space Grotesk, and IBM Plex Mono. No CDN or internet connection is required to use the installed dashboard.
+A self-hosted firmware build station for a local-network Intel NUC. Project selection is private to each browser tab. Socket.IO synchronizes build history, build-ID-specific output, hardware telemetry, and all-time statistics. Successful firmware is permanently archived independently of history. The frontend uses locally compiled Tailwind CSS, Lucide icons, and locally hosted fonts.
 
 ## Run locally
 
@@ -11,21 +11,97 @@ npm ci
 npm start
 ```
 
-Open **http://localhost:3000** or **http://<server-LAN-IP>:3000**. The included `examples/signal-node` project runs immediately and creates a 64 KB test `.bin`. It is a reference binary pipeline, not flashable device firmware. There are no fabricated builds or hardware readings in the dashboard.
+Open **http://localhost:3000** or **http://<server-LAN-IP>:3000**. No example projects are bundled. Select your own server-side project directory. The initial browser location is `PROJECT_PATH`, or the first allowed browse root; it need not itself be a buildable project.
+
+Local PlatformIO builds also need PlatformIO installed. One option is:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install platformio
+PIO_COMMAND="$PWD/.venv/bin/pio" npm start
+```
+
+The Debian installer configures this executable automatically. A compiler installation and several GB of free disk space are needed for the initial ESP32 SDK/toolchain download.
+
+## Set Up Your Firmware Project
+
+### Create a server directory
+
+After installing CompileZ with `setup.sh`, create a project owned by the service account. Run these commands on the NUC with an account permitted to use `sudo`:
+
+```bash
+SERVICE_USER="$(systemctl show compilez.service -p User --value)"
+SERVICE_GROUP="$(id -gn "$SERVICE_USER")"
+sudo install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 0750 \
+	/opt/compilez/spaces/nils/src
+sudo -u "$SERVICE_USER" /opt/compilez/.venv/bin/pio project init \
+	--project-dir /opt/compilez/spaces/nils \
+	--board esp32dev --project-option 'framework=arduino'
+```
+
+Alternatively, copy or clone your existing firmware project into a server directory. It must contain `platformio.ini` at its root and sources such as `src/main.cpp`. The service account must have read, write, and directory-traversal permissions; building creates `.pio` directories inside the project. Do not use `chmod 777` or run CompileZ as root.
+
+The default installer permits `/opt/compilez`, `/home`, and `/dev/shm`. For a project elsewhere, add its parent to `BROWSE_ROOTS` in `/etc/compilez.env` and restart the service. Use persistent storage for source projects; `/dev/shm` is temporary and disappears after reboot.
+
+### Configure PlatformIO
+
+Select `/opt/compilez/spaces/nils` in CompileZ's directory picker. The **Compiler config** editor opens that directory's `platformio.ini`. A minimal ESP32 Arduino configuration is:
+
+```ini
+[env:esp32dev]
+platform = espressif32
+board = esp32dev
+framework = arduino
+monitor_speed = 115200
+lib_deps =
+	bblanchon/ArduinoJson@7.4.2
+```
+
+Adjust the board, platform version, and libraries for your hardware, then click **SAVE CONFIG**. PlatformIO downloads the platform, toolchain, Arduino framework, and declared `lib_deps` on first use. ESP32 WiFi and WebServer are framework libraries and do not need separate `lib_deps` entries. `#include` directives do not reliably install arbitrary missing libraries; declare external dependencies explicitly.
+
+The project layout should look like:
+
+```text
+/opt/compilez/spaces/nils/
+	platformio.ini
+	src/
+		main.cpp
+	include/                 optional project headers
+	lib/                     optional local libraries
+```
+
+Add your application code to `src/main.cpp` using Git, your editor, SCP, or rsync. The dashboard edits compiler configuration, not C++ source files. A minimal source for checking the setup is:
+
+```cpp
+#include <Arduino.h>
+
+void setup() {
+	Serial.begin(115200);
+}
+
+void loop() {
+	Serial.println("Firmware running");
+	delay(1000);
+}
+```
+
+### Build and download
+
+Enter a build name, click **COMPILE**, and inspect the output for that Build ID. A successful firmware-producing build gets a **Download .bin** link. No ESP32 needs to be connected to the NUC to compile; CompileZ does not automatically flash the device. Choose the correct flashing method and firmware image for your board.
 
 ## Build your project
 
-Browse the **server's** filesystem or enter an absolute path, then enter a required **Build name** before clicking Compile. Names are trimmed and limited to 100 characters. The server also rejects missing names, including requests sent outside the UI. Pressing Enter submits the same validated form. Paths are validated against `BROWSE_ROOTS`, including symlink resolution. The path is synchronized when committed by changing focus, selecting a directory, or submitting a build. A remote path update is authoritative, including while another client is editing.
+Browse the **server's** filesystem or enter an absolute path, then enter a required **Build name** before clicking Compile. Names are trimmed and limited to 100 characters. Selection is stored in this tab's session storage and is never broadcast to other users or tabs. Reloading the same tab restores its path if still valid. Every build request explicitly captures the selected canonical path. Selecting or building another project cannot redirect someone else's current or future submissions.
 
-- A project with `platformio.ini` runs `pio run` (takes precedence).
+- A project with `platformio.ini` runs `pio run --target clean`, then `pio run` on every submission, even when the code is unchanged. A failed or cancelled clean phase does not start compilation. No manual clean command is needed. This forces real recompilation instead of reusing incremental objects; downloaded dependencies remain cached. Compilation can still fail because of source errors, permissions, missing tools, disk space, or network problems.
 - Otherwise a project with `compile.sh` runs `/bin/bash compile.sh` in that directory.
 - Other directories remain browsable but cannot be compiled.
-- Scripts must run in the foreground and exit nonzero when compilation fails. Do not daemonize the compiler. For a custom toolchain, put its command in `compile.sh`.
+- Scripts must run in the foreground and exit nonzero when compilation fails. Do not daemonize the compiler. For a custom toolchain, put its commands in `compile.sh`. CompileZ runs that script on every request and sets `COMPILEZ_CLEAN_BUILD=1`; the script must implement its toolchain's clean/rebuild command itself because arbitrary script output directories cannot be safely guessed.
 - Two workers run concurrently by default. Each build snapshots its project directory at submission. Builds for the **same canonical directory** are serialized to prevent shared output collisions; different directories run in parallel.
 - Stop terminates only that build's process group with `SIGTERM`, escalating to `SIGKILL` after 2.5 seconds. Cancelling a queued build does not affect a worker.
 - Output is kept per build and streamed independently. Selecting a build changes only your local terminal view. A reconnect retrieves the latest shared state and the selected build's log tail.
 - History shows the custom name, local start timestamp, and elapsed duration. Exact start/end timestamps are stored as UTC ISO timestamps and available in the timestamp tooltip and state API. Queued builds show "Not started" until a worker starts them.
-- The trash icon deletes a finished build after confirmation, removing its logs and copied firmware from all clients. Running and queued builds cannot be deleted; cancel them first. Deleting history never subtracts from all-time statistics.
+- The trash icon deletes a finished history entry and its logs, but **does not delete saved firmware or statistics**. Running and queued builds cannot be deleted; cancel them first.
 
 ### All-time statistics
 
@@ -37,13 +113,27 @@ Total builds counts finished attempts, including cancelled and interrupted build
 
 ### Edit compiler config
 
-The **Compiler config** editor loads `platformio.ini` from the globally selected project directory. A missing file opens an empty editor; selecting a directory never creates a file by itself. **SAVE CONFIG** atomically writes the raw text to that project's file, confirms the save, and broadcasts the saved text to every connected client viewing that project. Unsaved typing stays local. A shared project change, reconnect, or another client's save replaces local unsaved text with the authoritative file and shows a notification.
+The **Compiler config** editor loads `platformio.ini` from your tab's selected directory. A missing file opens an empty editor; selecting a directory never creates a file by itself. **SAVE CONFIG** atomically writes the raw text to that project's file. Other users viewing the **same directory** see the saved contents, since it is the same physical file; users viewing other directories keep their own selection and text. Unsaved typing stays local. Changing your own project, reconnecting, or another client's save to the same project replaces unsaved text with the authoritative file and shows a notification.
 
 Files are limited to 64 KB and config symlinks are rejected. Saves include the revision originally loaded, so simultaneous or externally modified files cannot be silently overwritten; use the reload icon to retrieve the latest file after a conflict. Saving does not restart an active build. Creating `platformio.ini` in a script-only project switches future builds to PlatformIO, as described above.
 
-Downloads are copied into build-ID-specific storage before the next same-directory build starts. Firmware is discovered at `firmware.bin`, `build/firmware.bin`, `dist/firmware.bin`, or `.pio/build/<environment>/firmware.bin`. Successful builds without firmware remain completed but have no download. Old firmware and firmware symlinked outside the project are not offered. With multiple PlatformIO environments, the most recently modified firmware is selected; use separate project directories when separate environment artifacts are required.
+### Saved firmware and storage
 
-The queue is capped at 32 outstanding jobs. The last 50 builds and up to 400 output chunks (8 KB each) per build persist to disk; large output chunks are truncated. This is a bounded terminal tail, not an unlimited audit log. Entries dropped from history also lose their stored artifact. On restart, unfinished builds become `interrupted` and are not silently rerun. History writes are atomic and debounced, so an abrupt power failure can lose the most recent update.
+Every successful firmware-producing build gets an independent archived copy before the next build for that directory starts. Firmware is discovered at `firmware.bin`, `build/firmware.bin`, `dist/firmware.bin`, or `.pio/build/<environment>/firmware.bin`. A valid successful build's binary is not rejected merely because its modification time is old. Symlinks outside the project are still rejected. With multiple environments, the newest matching firmware is selected; use separate projects if you need individually selectable environment artifacts. Successful builds that produce no binary have no download.
+
+With the default systemd installation:
+
+```text
+/opt/compilez/spaces/nils/.pio/build/esp32dev/firmware.bin  current project output
+/var/lib/compilez/artifacts/<Build-ID>.bin                permanent build copy
+/var/lib/compilez/artifacts/<Build-ID>.json               archive metadata
+```
+
+Local development uses `.data/artifacts/` unless `DATA_DIR` is set. Rebuilding can replace or clean the project's `.pio` output, but not the archived Build-ID copies. **Old binaries remain saved when history entries are deleted, pruned, or the server restarts.** Open **Stats > Saved firmware** to download them even after they disappear from the build queue. Existing `.bin` files without metadata are also listed by ID. Files already deleted by older releases cannot be recovered by this update.
+
+There is no automatic archive expiry. Back up `DATA_DIR` and monitor free disk space. Only an administrator manually removing archive files deletes them. The archive is shared with authorized dashboard users, not private per-user storage.
+
+The queue is capped at 32 outstanding jobs. The last 50 builds and up to 400 output chunks (8 KB each) per build persist to disk; large output chunks are truncated. This bounds history/logs only, not the firmware archive. On restart, unfinished builds become `interrupted` and are not silently rerun. History writes are atomic and debounced, so an abrupt power failure can lose the most recent update.
 
 ## Debian 12 installation
 
@@ -79,14 +169,16 @@ Real-time scheduling (`rr`) is intentionally not used: it can starve essential s
 | --- | --- | --- |
 | `HOST` | `0.0.0.0` | Listen interface |
 | `PORT` | `3000` | HTTP and Socket.IO port |
-| `PROJECT_PATH` | bundled example | Initial project on first start |
+| `PROJECT_PATH` | first browse root | Initial location for tabs with no saved selection; installer uses `/opt/compilez/spaces` |
 | `BROWSE_ROOTS` | application directory, `/home`, `/dev/shm` | Comma-separated allowed existing directories |
 | `MAX_CONCURRENT_BUILDS` | `2` | 1 to 16 workers; same-path builds still serialize |
 | `DATA_DIR` | `.data` in application directory | History and copied firmware |
 | `PIO_COMMAND` | `pio` | PlatformIO executable, no shell arguments |
 | `COMPILEZ_TOKEN` | unset in local development | Optional HTTP Basic password; username `compilez` |
 
-The previously selected path is restored from history when still allowed. Environment variables must be exported to Node; `.env.example` is a reference, not automatically loaded. For local development with a configuration file, use `node --env-file=.env server.js` on Node 22. The systemd installation reads `/etc/compilez.env` instead.
+Selections are never restored from shared server history. `PROJECT_PATH` provides only a default; a tab's own valid saved path takes precedence. An unavailable default falls back to the first browse root. Environment variables must be exported to Node; `.env.example` is a reference, not automatically loaded. For local development with a configuration file, use `node --env-file=.env server.js` on Node 22. The systemd installation reads `/etc/compilez.env` instead. Existing installations keep their environment file on upgrade; replace old defaults pointing at removed projects with your real project or `/opt/compilez/spaces`.
+
+If a build reports `spawn pio ENOENT`, verify `/opt/compilez/.venv/bin/pio --version` and set `PIO_COMMAND=/opt/compilez/.venv/bin/pio` in the actual service environment. Restart the service after changing environment variables. A shell's `PATH` may differ from systemd's.
 
 ## Security boundary
 
@@ -103,16 +195,6 @@ npm audit
 
 `npm run dev` restarts Node on backend edits. Run `npm run build:css` after changing frontend classes or CSS. Tests use temporary directories, real child processes, and multiple Socket.IO clients. The concurrency stress test submits twelve builds simultaneously to five workers, checks per-Build-ID stdout/stderr and firmware isolation on three clients, cancels one job, and lets another fail without stopping the others. The installer requires root, network access, APT, and systemd; syntax validation does not substitute for testing deployment on an actual Debian NUC.
 
-## Heavy ESP32 example
-
-Generate a real `esp32dev` workload with 192 C++ translation units, 12,288 math functions, and ArduinoJson/TFT_eSPI/FastLED dependencies:
-
-```bash
-npm run example:heavy
-```
-
-Select the absolute `example-heavy-project` directory in CompileZ to build it. For five concurrent jobs, generate independent project copies with `npm run example:heavy -- --copies 5` and configure the running server for five workers. Submissions for the same directory intentionally remain serialized. See [example-heavy-project/README.md](example-heavy-project/README.md) for full rebuilds, timing calibration, dependencies, disk requirements, and concurrent-user testing. A 15-30 second duration depends on the NUC and cache state and is not guaranteed without measurement.
-
 ## Structure
 
 ```text
@@ -121,10 +203,7 @@ public/index.html            Dashboard and dialogs
 public/app.js                Real-time vanilla frontend
 public/styles.css            Tailwind source and dashboard styling
 public/fonts/                Self-hosted fonts and licenses
-examples/signal-node/        Runnable reference binary pipeline
-example-heavy-project/       Tunable generated ESP32 compiler workload
 test/server.test.js          Server integration tests
-test/heavy-project.test.js   Workload generator regression test
 setup.sh                     Debian provisioning and systemd setup
 .env.example                 Environment reference
 ```

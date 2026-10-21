@@ -54,6 +54,7 @@ if ! id "$SERVICE_USER" >/dev/null 2>&1; then
 fi
 SERVICE_GROUP="$(id -gn "$SERVICE_USER")"
 install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 0750 "$INSTALL_DIR" "$DATA_DIR"
+install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 0750 "$INSTALL_DIR/spaces"
 if [[ "$(realpath "$SOURCE_DIR")" != "$(realpath "$INSTALL_DIR")" ]]; then
   rsync -a --exclude=node_modules --exclude=.data --exclude=.git --exclude=.env --exclude=.venv --exclude=test-results "$SOURCE_DIR/" "$INSTALL_DIR/"
 fi
@@ -78,7 +79,7 @@ HOST=0.0.0.0
 PORT=3000
 MAX_CONCURRENT_BUILDS=2
 DATA_DIR=$DATA_DIR
-PROJECT_PATH=$INSTALL_DIR/examples/signal-node
+PROJECT_PATH=$INSTALL_DIR/spaces
 BROWSE_ROOTS=$INSTALL_DIR,/home,/dev/shm
 PIO_COMMAND=$INSTALL_DIR/.venv/bin/pio
 COMPILEZ_TOKEN=$TOKEN

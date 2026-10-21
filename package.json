@@ -10,7 +10,6 @@
     "dev": "node --watch server.js",
     "build:css": "tailwindcss -i public/styles.css -o public/tailwind.css --minify",
     "test": "node --test",
-    "example:heavy": "node example-heavy-project/generate.mjs",
     "check": "node --check server.js && node --check public/app.js && bash -n setup.sh",
     "postinstall": "npm run build:css"
   },

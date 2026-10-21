@@ -4,7 +4,9 @@ const icons = () => lucide.createIcons({ attrs: { 'stroke-width': 1.65 } });
 const activeStates = new Set(['running', 'cancelling']);
 const labels = { queued: 'Queued', running: 'Running', cancelling: 'Stopping', completed: 'Completed', failed: 'Failed', cancelled: 'Cancelled', interrupted: 'Interrupted' };
 const statusIcons = { queued: 'clock-3', running: 'loader-circle', cancelling: 'loader-circle', completed: 'circle-check', failed: 'circle-x', cancelled: 'circle-slash', interrupted: 'circle-alert' };
-let state = { builds: [], projectPath: '', stats: {}, maxConcurrent: 2, roots: [] };
+let state = { builds: [], stats: {}, maxConcurrent: 2, roots: [] };
+let projectPath = '';
+let pathRequest = 0;
 let selectedId = null;
 let filter = 'all';
 let connected = false;
@@ -53,18 +55,20 @@ function setConnection(value) {
   renderConfigControls();
 }
 
-socket.on('connect', () => { configNeedsReload = true; setConnection(true); });
+socket.on('connect', () => { configNeedsReload = true; setConnection(true); void loadArtifacts(); });
 socket.on('disconnect', () => setConnection(false));
 socket.on('connect_error', () => setConnection(false));
 socket.on('state', (next) => {
-  const previousPath = state.projectPath;
   state = next;
-  if (previousPath !== state.projectPath || document.activeElement !== $('#project-path')) $('#project-path').value = state.projectPath;
-  $('#project-name').textContent = fileName(state.projectPath);
-  $('#project-path').title = state.projectPath;
-  if (previousPath !== state.projectPath || configNeedsReload) {
+  if (!projectPath) {
+    projectPath = next.defaultProjectPath;
+    let preferred = projectPath;
+    try { preferred = sessionStorage.getItem('compilez-project-path') || projectPath; } catch {}
     configNeedsReload = false;
-    void loadConfig(state.projectPath);
+    void updatePath(preferred).catch(() => updatePath(next.defaultProjectPath).catch((error) => toast(error.message, true)));
+  } else if (configNeedsReload) {
+    configNeedsReload = false;
+    void loadConfig(projectPath);
   }
   if (!selectedId && state.builds.length) void selectBuild(state.builds[0].id);
   if (selectedId && !selectedBuild()) { selectedId = null; if (state.builds.length) void selectBuild(state.builds[0].id); }
@@ -78,8 +82,9 @@ socket.on('state', (next) => {
   if (selectedId) void loadLogs(selectedId);
 });
 socket.on('stats', (stats) => { state.stats = stats; renderStats(stats, true); });
+socket.on('artifacts:changed', () => { void loadArtifacts(); });
 socket.on('config:saved', (saved) => {
-  if (saved.path !== state.projectPath) return;
+  if (saved.path !== projectPath) return;
   if (config && saved.version < config.version) return;
   const hadDraft = config && $('#config-content').value !== config.content;
   configLoadId++;
@@ -204,6 +209,16 @@ function renderBuildStatistics() {
   $('#stats-updated').textContent = metrics.updatedAt ? `Updated ${timestamp(metrics.updatedAt)}` : 'No completed builds';
 }
 
+async function loadArtifacts() {
+  try {
+    const artifacts = await api('/api/artifacts');
+    $('#archive-count').textContent = `${artifacts.length} files`;
+    $('#firmware-list').innerHTML = artifacts.length ? artifacts.map((artifact) => `<div class="firmware-item"><div><strong>${escapeHtml(artifact.buildName)}</strong><p class="mono">${escapeHtml(artifact.projectPath || artifact.id)}</p><span>${escapeHtml(timestamp(artifact.createdAt))} / ${(artifact.bytes / 1024).toFixed(1)} KB</span></div><a class="archive-download" href="/api/builds/${artifact.id}/artifact" aria-label="Download ${escapeHtml(artifact.buildName)} firmware"><i data-lucide="download"></i> .bin</a></div>`).join('') : '<p class="archive-empty">No saved firmware</p>';
+    icons();
+  } catch (error) { $('#firmware-list').textContent = error.message; }
+}
+$('#refresh-archive').addEventListener('click', () => { void loadArtifacts(); });
+
 function renderQueue() {
   const active = state.builds.filter((build) => activeStates.has(build.status) || build.status === 'queued');
   const completed = state.builds.filter((build) => build.status === 'completed');
@@ -289,8 +304,17 @@ function renderLogs() {
 }
 
 async function updatePath(target) {
+  const request = ++pathRequest;
   const result = await api('/api/project', 'PUT', { path: target });
-  $('#project-path').value = result.path;
+  if (request === pathRequest) {
+    const changed = projectPath !== result.path || !config;
+    projectPath = result.path;
+    $('#project-path').value = projectPath;
+    $('#project-path').title = projectPath;
+    $('#project-name').textContent = fileName(projectPath);
+    try { sessionStorage.setItem('compilez-project-path', projectPath); } catch {}
+    if (changed) void loadConfig(projectPath);
+  }
   return result.path;
 }
 
@@ -303,8 +327,8 @@ $('#project-form').addEventListener('submit', async (event) => {
   submitting = true;
   $('#compile-button').disabled = true;
   try {
-    await updatePath(target);
-    const build = await api('/api/builds', 'POST', { path: target, name });
+    const directory = await updatePath(target);
+    const build = await api('/api/builds', 'POST', { path: directory, name });
     await selectBuild(build.id);
     toast('Build added to the queue');
   } catch (error) { toast(error.message, true); }
@@ -313,7 +337,7 @@ $('#project-form').addEventListener('submit', async (event) => {
 $('#build-name').addEventListener('input', () => $('#build-name').setCustomValidity(''));
 $('#project-path').addEventListener('change', async () => {
   try { await updatePath($('#project-path').value.trim()); }
-  catch (error) { toast(error.message, true); $('#project-path').value = state.projectPath; }
+  catch (error) { toast(error.message, true); $('#project-path').value = projectPath; }
 });
 
 async function cancelBuild(id) {
@@ -417,7 +441,7 @@ async function browse(target) {
 }
 function openBrowser() {
   $('#directory-modal').showModal();
-  void browse(state.projectPath);
+  void browse(projectPath);
 }
 $('#browse-button').addEventListener('click', openBrowser);
 $('#close-browser').addEventListener('click', () => $('#directory-modal').close());
@@ -428,7 +452,7 @@ $('#directory-list').addEventListener('click', (event) => { const button = event
 $('#select-directory').addEventListener('click', async () => {
   if (!directory) return;
   $('#select-directory').disabled = true;
-  try { await updatePath(directory.path); $('#directory-modal').close(); toast('Shared project directory updated'); }
+  try { await updatePath(directory.path); $('#directory-modal').close(); toast('Project directory selected'); }
   catch (error) { toast(error.message, true); }
   finally { $('#select-directory').disabled = false; }
 });
@@ -450,7 +474,7 @@ function renderConfigControls() {
 }
 
 function applyConfig(next) {
-  if (next.path !== state.projectPath || (config && next.version < config.version)) return;
+  if (next.path !== projectPath || (config && next.version < config.version)) return;
   config = next;
   configError = '';
   $('#config-content').value = next.content;
@@ -468,7 +492,7 @@ async function loadConfig(target) {
   renderConfigControls();
   try {
     const next = await api(`/api/config?path=${encodeURIComponent(target)}`);
-    if (request === configLoadId && target === state.projectPath) applyConfig(next);
+    if (request === configLoadId && target === projectPath) applyConfig(next);
   } catch (error) {
     if (request !== configLoadId) return;
     configError = error.message;
@@ -480,7 +504,7 @@ async function loadConfig(target) {
 $('#config-content').addEventListener('input', renderConfigControls);
 $('#reload-config').addEventListener('click', () => {
   if (config && $('#config-content').value !== config.content && !window.confirm('Discard unsaved config changes and reload from disk?')) return;
-  void loadConfig(state.projectPath);
+  void loadConfig(projectPath);
 });
 $('#save-config').addEventListener('click', async () => {
   if (!config || savingConfig || !connected) return;

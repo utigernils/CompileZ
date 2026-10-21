@@ -22,14 +22,17 @@ export async function createCompileZ(options = {}) {
   const httpServer = createServer(app);
   const io = new Server(httpServer, { maxHttpBufferSize: 16_384 });
   const dataDir = options.dataDir || process.env.DATA_DIR || path.join(baseDir, '.data');
-  const initialPath = options.initialPath || process.env.PROJECT_PATH || path.join(baseDir, 'examples', 'signal-node');
   const roots = await Promise.all((options.roots || (process.env.BROWSE_ROOTS || `${baseDir},/home,/dev/shm`).split(','))
     .map((root) => fs.realpath(root.trim())));
   const maxConcurrent = Math.max(1, Math.min(16, Number(options.maxConcurrent ?? process.env.MAX_CONCURRENT_BUILDS) || 2));
   const token = options.token ?? process.env.COMPILEZ_TOKEN;
   const builds = [];
   const processes = new Map();
-  let projectPath = await validDirectory(initialPath);
+  const defaultProjectPath = await validDirectory(options.initialPath || process.env.PROJECT_PATH || roots[0]).catch(async (error) => {
+    if (options.initialPath) throw error;
+    console.warn('Initial project path unavailable; using the first browse root:', error.message);
+    return validDirectory(roots[0]);
+  });
   let stats = { cpu: null, temperature: null, memoryUsed: null, memoryTotal: null, cores: os.cpus().length, hostname: os.hostname(), updatedAt: null };
   let closing = false;
   let finishingBuilds = 0;
@@ -52,7 +55,6 @@ export async function createCompileZ(options = {}) {
       }
       builds.push(build);
     }
-    if (saved.projectPath) projectPath = await validDirectory(saved.projectPath).catch(() => projectPath);
   } catch (error) {
     if (error.code !== 'ENOENT') console.warn('History could not be restored:', error.message);
   }
@@ -111,7 +113,7 @@ export async function createCompileZ(options = {}) {
   }
 
   function snapshot() {
-    return { projectPath, builds: builds.map(({ logs, logSequence, statisticsRecorded, ...build }) => build), stats, buildStatistics: statisticsSnapshot(), maxConcurrent, roots };
+    return { defaultProjectPath, builds: builds.map(({ logs, logSequence, statisticsRecorded, ...build }) => build), stats, buildStatistics: statisticsSnapshot(), maxConcurrent, roots };
   }
 
   function buildDuration(build) {
@@ -183,7 +185,7 @@ export async function createCompileZ(options = {}) {
   }
 
   function persist() {
-    const saved = JSON.stringify({ projectPath, builds });
+    const saved = JSON.stringify({ builds });
     persistQueue = persistQueue.catch(() => {}).then(async () => {
       const temporary = path.join(dataDir, 'history.tmp');
       await fs.writeFile(temporary, saved);
@@ -214,7 +216,7 @@ export async function createCompileZ(options = {}) {
 
   async function commandFor(directory) {
     if (await fs.stat(path.join(directory, 'platformio.ini')).then(() => true, () => false)) {
-      return { command: process.env.PIO_COMMAND || 'pio', args: ['run'], display: 'pio run' };
+      return { command: process.env.PIO_COMMAND || 'pio', args: ['run'], display: 'pio run', prepare: { args: ['run', '--target', 'clean'], display: 'pio run --target clean' } };
     }
     if (await fs.stat(path.join(directory, 'compile.sh')).then((stat) => stat.isFile(), () => false)) {
       return { command: '/bin/bash', args: ['compile.sh'], display: 'bash compile.sh' };
@@ -236,6 +238,15 @@ export async function createCompileZ(options = {}) {
       return stat?.isFile() ? { target, modified: stat.mtimeMs } : null;
     }));
     return artifacts.filter(Boolean).sort((first, second) => second.modified - first.modified)[0]?.target || null;
+  }
+
+  async function archivedArtifact(id) {
+    if (!/^[a-f0-9-]{36}$/i.test(id)) return null;
+    const stat = await fs.lstat(path.join(dataDir, 'artifacts', `${id}.bin`)).catch(() => null);
+    if (!stat?.isFile()) return null;
+    const metadata = await fs.readFile(path.join(dataDir, 'artifacts', `${id}.json`), 'utf8').then(JSON.parse).catch(() => ({}));
+    const legacy = builds.find((build) => build.id === id);
+    return { id, name: path.basename(metadata.name || legacy?.artifact?.name || `${id}.bin`), buildName: metadata.buildName || legacy?.name || id.slice(0, 8), projectPath: metadata.projectPath || legacy?.path || '', createdAt: metadata.createdAt || legacy?.finishedAt || stat.mtime.toISOString(), bytes: stat.size };
   }
 
   function signalGroup(child, signal) {
@@ -270,12 +281,14 @@ export async function createCompileZ(options = {}) {
             const resolved = await fs.realpath(artifact);
             if (!inside(build.path, resolved)) throw new Error('Artifact symlink points outside the project');
             const artifactStat = await fs.stat(resolved);
-            if (artifactStat.mtimeMs < Date.parse(build.startedAt) - 1000) {
-              appendLog(build, 'Existing firmware is older than this build; download omitted.\n', 'system');
-            } else {
-              await fs.copyFile(resolved, path.join(dataDir, 'artifacts', `${build.id}.bin`));
+            const temporary = path.join(dataDir, 'artifacts', `${build.id}.bin.tmp`);
+            try {
+              await fs.copyFile(resolved, temporary, constants.COPYFILE_EXCL);
+              await fs.rename(temporary, path.join(dataDir, 'artifacts', `${build.id}.bin`));
               build.artifact = { name: `${build.project}-${build.id.slice(0, 8)}.bin`, bytes: artifactStat.size };
-            }
+              await fs.writeFile(path.join(dataDir, 'artifacts', `${build.id}.json`), JSON.stringify({ id: build.id, ...build.artifact, buildName: build.name, projectPath: build.path, createdAt: new Date().toISOString() }), { flag: 'wx' });
+              io.emit('artifacts:changed');
+            } finally { await fs.unlink(temporary).catch(() => {}); }
           } else appendLog(build, 'Build succeeded. No firmware.bin was produced.\n', 'system');
         } catch (artifactError) { appendLog(build, `Artifact unavailable: ${artifactError.message}\n`, 'stderr'); }
         build.progress = 100;
@@ -293,22 +306,31 @@ export async function createCompileZ(options = {}) {
     try {
       await validDirectory(build.path);
       const command = await commandFor(build.path);
-      if (build.status === 'cancelling' || closing) return finish(null, 'SIGTERM');
-      build.command = command.display;
-      appendLog(build, `$ ${command.display}\n`, 'system');
-      child = spawn(command.command, command.args, {
-        cwd: build.path, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env, FORCE_COLOR: '0', TERM: 'dumb', CI: '1' }
-      });
-      processes.set(build.id, { child });
-      for (const stream of ['stdout', 'stderr']) {
-        const decoder = new StringDecoder('utf8');
-        child[stream].on('data', (chunk) => appendLog(build, decoder.write(chunk), stream));
-        child[stream].on('end', () => appendLog(build, decoder.end(), stream));
+      const phases = command.prepare ? [command.prepare, command] : [command];
+      for (const phase of phases) {
+        if (build.status === 'cancelling' || closing) return finish(null, 'SIGTERM');
+        build.command = phase.display;
+        appendLog(build, `$ ${phase.display}\n`, 'system');
+        const outcome = await new Promise((resolve) => {
+          child = spawn(command.command, phase.args, {
+            cwd: build.path, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
+            env: { ...process.env, FORCE_COLOR: '0', TERM: 'dumb', CI: '1', COMPILEZ_CLEAN_BUILD: '1' }
+          });
+          processes.set(build.id, { child });
+          for (const stream of ['stdout', 'stderr']) {
+            const decoder = new StringDecoder('utf8');
+            child[stream].on('data', (chunk) => appendLog(build, decoder.write(chunk), stream));
+            child[stream].on('end', () => appendLog(build, decoder.end(), stream));
+          }
+          child.once('error', (error) => resolve({ code: null, signal: null, error }));
+          child.once('close', (code, signal) => resolve({ code, signal }));
+          publish();
+        });
+        clearTimeout(processes.get(build.id)?.killTimer);
+        signalGroup(child, 'SIGKILL');
+        if (outcome.code !== 0 || outcome.error || build.status === 'cancelling' || closing) return finish(outcome.code, outcome.signal, outcome.error);
       }
-      child.once('error', (error) => { void finish(null, null, error); });
-      child.once('close', (code, signal) => { void finish(code, signal); });
-      publish();
+      await finish(0, null);
     } catch (error) { await finish(null, null, error); }
   }
 
@@ -327,19 +349,18 @@ export async function createCompileZ(options = {}) {
   app.get('/api/state', (_request, response) => response.json(snapshot()));
   app.get('/api/stats', (_request, response) => response.json(statisticsSnapshot()));
   app.get('/api/directories', route(async (request, response) => {
-    const directory = await validDirectory(request.query.path || projectPath);
+    const directory = await validDirectory(request.query.path || defaultProjectPath);
     const entries = await fs.readdir(directory, { withFileTypes: true });
     const folders = entries.filter((entry) => entry.isDirectory() && !entry.name.startsWith('.')).map((entry) => ({ name: entry.name, path: path.join(directory, entry.name) })).sort((first, second) => first.name.localeCompare(second.name));
     const parent = path.dirname(directory);
     response.json({ path: directory, parent: roots.some((root) => inside(root, parent)) ? parent : null, roots, folders });
   }));
   app.put('/api/project', route(async (request, response) => {
-    projectPath = await validDirectory(request.body.path);
-    publish();
-    response.json({ path: projectPath });
+    const directory = await validDirectory(request.body.path);
+    response.json({ path: directory });
   }));
   app.get('/api/config', route(async (request, response) => {
-    const directory = await validDirectory(request.query.path || projectPath);
+    const directory = await validDirectory(request.query.path || defaultProjectPath);
     const config = await configTask(() => readConfig(directory));
     response.setHeader('Cache-Control', 'no-store');
     response.json(config);
@@ -368,7 +389,7 @@ export async function createCompileZ(options = {}) {
     if (closing) return response.status(503).json({ error: 'Server is shutting down' });
     const name = typeof request.body.name === 'string' ? request.body.name.trim() : '';
     if (!name || name.length > 100 || /[\x00-\x1f\x7f]/.test(name)) return response.status(400).json({ error: 'Enter a build name of 1 to 100 characters without control characters' });
-    const directory = await validDirectory(request.body.path || projectPath);
+    const directory = await validDirectory(request.body.path);
     await commandFor(directory);
     if (builds.filter((build) => activeStatuses.has(build.status) || build.status === 'queued').length >= 32) return response.status(429).json({ error: 'The build queue is full' });
     const build = { id: randomUUID(), name, project: path.basename(directory), path: directory, status: 'queued', createdAt: new Date().toISOString(), startedAt: null, finishedAt: null, durationMs: 0, step: 'Waiting for an available worker', progress: null, logs: [], logSequence: 0, artifact: null };
@@ -376,8 +397,7 @@ export async function createCompileZ(options = {}) {
     while (builds.length > 50) {
       const removable = builds.findLastIndex((item) => !activeStatuses.has(item.status) && item.status !== 'queued');
       if (removable < 0) break;
-      const [removed] = builds.splice(removable, 1);
-      void fs.unlink(path.join(dataDir, 'artifacts', `${removed.id}.bin`)).catch(() => {});
+      builds.splice(removable, 1);
     }
     publish();
     pump();
@@ -410,7 +430,6 @@ export async function createCompileZ(options = {}) {
     if (index < 0) return response.status(404).json({ error: 'Build not found' });
     const build = builds[index];
     if (activeStatuses.has(build.status) || build.status === 'queued' || processes.has(build.id)) return response.status(409).json({ error: 'Only finished builds can be deleted' });
-    await fs.unlink(path.join(dataDir, 'artifacts', `${build.id}.bin`)).catch((error) => { if (error.code !== 'ENOENT') throw error; });
     const currentIndex = builds.indexOf(build);
     if (currentIndex < 0) return response.status(404).json({ error: 'Build already deleted' });
     builds.splice(currentIndex, 1);
@@ -423,11 +442,16 @@ export async function createCompileZ(options = {}) {
     if (!build) return response.status(404).json({ error: 'Build not found' });
     response.json({ buildId: build.id, logs: build.logs });
   });
-  app.get('/api/builds/:id/artifact', (request, response, next) => {
-    const build = builds.find((item) => item.id === request.params.id);
-    if (!build?.artifact || build.status !== 'completed') return response.status(404).json({ error: 'No firmware artifact available' });
-    response.download(path.join(dataDir, 'artifacts', `${build.id}.bin`), build.artifact.name, (error) => { if (error) next(error); });
-  });
+  app.get('/api/artifacts', route(async (_request, response) => {
+    const entries = await fs.readdir(path.join(dataDir, 'artifacts'));
+    const artifacts = await Promise.all(entries.filter((entry) => entry.endsWith('.bin')).map((entry) => archivedArtifact(entry.slice(0, -4))));
+    response.json(artifacts.filter(Boolean).sort((first, second) => second.createdAt.localeCompare(first.createdAt)));
+  }));
+  app.get('/api/builds/:id/artifact', route(async (request, response) => {
+    const artifact = await archivedArtifact(request.params.id);
+    if (!artifact) return response.status(404).json({ error: 'No firmware artifact available' });
+    response.download(path.join(dataDir, 'artifacts', `${artifact.id}.bin`), artifact.name);
+  }));
   app.use('/vendor', express.static(path.join(baseDir, 'node_modules/lucide/dist/umd'), { maxAge: '1d' }));
   app.use(express.static(path.join(baseDir, 'public')));
   app.use((error, _request, response, _next) => {

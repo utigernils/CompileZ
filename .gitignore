@@ -2,8 +2,5 @@ node_modules/
 .data/
 .env
 public/tailwind.css
-examples/*/build/
 test-results/
-example-heavy-project/.pio/
-example-heavy-project/src/generated/
-example-heavy-project/copies/
+spaces/
