@@ -34,7 +34,7 @@ fi
 export DEBIAN_FRONTEND=noninteractive
 printf '\n[1/6] Installing system dependencies...\n'
 apt-get update
-apt-get install -y ca-certificates curl gnupg build-essential python3 python3-venv python3-pip git pkg-config lm-sensors rsync openssl util-linux
+apt-get install -y ca-certificates curl gnupg build-essential python3 python3-venv python3-pip git pkg-config lm-sensors rsync openssl util-linux avrdude
 
 printf '\n[2/6] Installing Node.js 22 LTS...\n'
 if ! command -v node >/dev/null 2>&1 || [[ "$(node -p 'Number(process.versions.node.split(".")[0])')" -lt 22 ]]; then
@@ -53,6 +53,7 @@ if ! id "$SERVICE_USER" >/dev/null 2>&1; then
   useradd --system --user-group --create-home --home-dir "$DATA_DIR" --shell /usr/sbin/nologin "$SERVICE_USER"
 fi
 SERVICE_GROUP="$(id -gn "$SERVICE_USER")"
+usermod -a -G dialout "$SERVICE_USER"
 install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 0750 "$INSTALL_DIR" "$DATA_DIR"
 install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 0750 "$INSTALL_DIR/spaces"
 if [[ "$(realpath "$SOURCE_DIR")" != "$(realpath "$INSTALL_DIR")" ]]; then
@@ -68,7 +69,7 @@ else
   runuser -u "$SERVICE_USER" -- npm install --no-audit --no-fund
 fi
 runuser -u "$SERVICE_USER" -- python3 -m venv "$INSTALL_DIR/.venv"
-runuser -u "$SERVICE_USER" -- "$INSTALL_DIR/.venv/bin/python" -m pip install --upgrade pip platformio
+runuser -u "$SERVICE_USER" -- "$INSTALL_DIR/.venv/bin/python" -m pip install --upgrade pip platformio 'esptool>=4.8,<5'
 
 printf '\n[5/6] Writing environment and systemd service...\n'
 if [[ ! -e "$ENV_FILE" ]]; then
@@ -82,6 +83,8 @@ DATA_DIR=$DATA_DIR
 PROJECT_PATH=$INSTALL_DIR/spaces
 BROWSE_ROOTS=$INSTALL_DIR,/home,/dev/shm
 PIO_COMMAND=$INSTALL_DIR/.venv/bin/pio
+ESPTOOL_COMMAND=$INSTALL_DIR/.venv/bin/esptool.py
+AVRDUDE_COMMAND=/usr/bin/avrdude
 COMPILEZ_TOKEN=$TOKEN
 ENVIRONMENT
   unset TOKEN

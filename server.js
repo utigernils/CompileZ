@@ -27,6 +27,7 @@ export async function createCompileZ(options = {}) {
   const maxConcurrent = Math.max(1, Math.min(16, Number(options.maxConcurrent ?? process.env.MAX_CONCURRENT_BUILDS) || 2));
   const token = options.token ?? process.env.COMPILEZ_TOKEN;
   const builds = [];
+  const flashes = [];
   const processes = new Map();
   const defaultProjectPath = await validDirectory(options.initialPath || process.env.PROJECT_PATH || roots[0]).catch(async (error) => {
     if (options.initialPath) throw error;
@@ -54,6 +55,14 @@ export async function createCompileZ(options = {}) {
         build.finishedAt = new Date().toISOString();
       }
       builds.push(build);
+    }
+    for (const flash of (saved.flashes || []).slice(0, 10)) {
+      if (activeStatuses.has(flash.status)) {
+        flash.status = 'interrupted';
+        flash.finishedAt = new Date().toISOString();
+        flash.step = 'Server restarted during upload; check the device before retrying';
+      }
+      flashes.push(flash);
     }
   } catch (error) {
     if (error.code !== 'ENOENT') console.warn('History could not be restored:', error.message);
@@ -113,7 +122,7 @@ export async function createCompileZ(options = {}) {
   }
 
   function snapshot() {
-    return { defaultProjectPath, builds: builds.map(({ logs, logSequence, statisticsRecorded, ...build }) => build), stats, buildStatistics: statisticsSnapshot(), maxConcurrent, roots };
+    return { defaultProjectPath, builds: builds.map(({ logs, logSequence, statisticsRecorded, ...build }) => build), flashes: flashes.map(({ logs, logSequence, ...flash }) => flash), stats, buildStatistics: statisticsSnapshot(), maxConcurrent, roots };
   }
 
   function buildDuration(build) {
@@ -185,7 +194,7 @@ export async function createCompileZ(options = {}) {
   }
 
   function persist() {
-    const saved = JSON.stringify({ builds });
+    const saved = JSON.stringify({ builds, flashes });
     persistQueue = persistQueue.catch(() => {}).then(async () => {
       const temporary = path.join(dataDir, 'history.tmp');
       await fs.writeFile(temporary, saved);
@@ -226,27 +235,33 @@ export async function createCompileZ(options = {}) {
 
   async function findArtifact(directory) {
     const candidates = [];
-    for (const candidate of ['firmware.bin', 'build/firmware.bin', 'dist/firmware.bin']) {
-      candidates.push(path.join(directory, candidate));
+    const names = ['firmware.merged.bin', 'merged-flash.bin', 'merged.bin', 'firmware.bin', 'firmware.hex'];
+    for (const folder of ['', 'build', 'dist']) {
+      for (const name of names) candidates.push(path.join(directory, folder, name));
     }
     const environments = await fs.readdir(path.join(directory, '.pio/build'), { withFileTypes: true }).catch(() => []);
     for (const environment of environments.filter((entry) => entry.isDirectory()).sort((first, second) => first.name.localeCompare(second.name))) {
-      candidates.push(path.join(directory, '.pio/build', environment.name, 'firmware.bin'));
+      for (const name of names) candidates.push(path.join(directory, '.pio/build', environment.name, name));
     }
     const artifacts = await Promise.all(candidates.map(async (target) => {
       const stat = await fs.stat(target).catch(() => null);
-      return stat?.isFile() ? { target, modified: stat.mtimeMs } : null;
+      return stat?.isFile() ? { target, modified: stat.mtimeMs, combined: /(?:merged|merged-flash)\.bin$/.test(target) } : null;
     }));
-    return artifacts.filter(Boolean).sort((first, second) => second.modified - first.modified)[0]?.target || null;
+    return artifacts.filter(Boolean).sort((first, second) => second.modified - first.modified || Number(second.combined) - Number(first.combined))[0]?.target || null;
   }
 
   async function archivedArtifact(id) {
     if (!/^[a-f0-9-]{36}$/i.test(id)) return null;
-    const stat = await fs.lstat(path.join(dataDir, 'artifacts', `${id}.bin`)).catch(() => null);
+    let extension = '.bin';
+    let stat = await fs.lstat(path.join(dataDir, 'artifacts', `${id}${extension}`)).catch((error) => { if (error.code !== 'ENOENT') throw error; return null; });
+    if (!stat) {
+      extension = '.hex';
+      stat = await fs.lstat(path.join(dataDir, 'artifacts', `${id}${extension}`)).catch((error) => { if (error.code !== 'ENOENT') throw error; return null; });
+    }
     if (!stat?.isFile()) return null;
     const metadata = await fs.readFile(path.join(dataDir, 'artifacts', `${id}.json`), 'utf8').then(JSON.parse).catch(() => ({}));
     const legacy = builds.find((build) => build.id === id);
-    return { id, name: path.basename(metadata.name || legacy?.artifact?.name || `${id}.bin`), buildName: metadata.buildName || legacy?.name || id.slice(0, 8), projectPath: metadata.projectPath || legacy?.path || '', createdAt: metadata.createdAt || legacy?.finishedAt || stat.mtime.toISOString(), bytes: stat.size };
+    return { id, extension, combined: metadata.combined ?? null, sourceName: metadata.sourceName || '', name: path.basename(metadata.name || legacy?.artifact?.name || `${id}${extension}`), buildName: metadata.buildName || legacy?.name || id.slice(0, 8), projectPath: metadata.projectPath || legacy?.path || '', createdAt: metadata.createdAt || legacy?.finishedAt || stat.mtime.toISOString(), bytes: stat.size };
   }
 
   function signalGroup(child, signal) {
@@ -281,12 +296,13 @@ export async function createCompileZ(options = {}) {
             const resolved = await fs.realpath(artifact);
             if (!inside(build.path, resolved)) throw new Error('Artifact symlink points outside the project');
             const artifactStat = await fs.stat(resolved);
-            const temporary = path.join(dataDir, 'artifacts', `${build.id}.bin.tmp`);
+            const extension = path.extname(resolved);
+            const temporary = path.join(dataDir, 'artifacts', `${build.id}${extension}.tmp`);
             try {
               await fs.copyFile(resolved, temporary, constants.COPYFILE_EXCL);
-              await fs.rename(temporary, path.join(dataDir, 'artifacts', `${build.id}.bin`));
-              build.artifact = { name: `${build.project}-${build.id.slice(0, 8)}.bin`, bytes: artifactStat.size };
-              await fs.writeFile(path.join(dataDir, 'artifacts', `${build.id}.json`), JSON.stringify({ id: build.id, ...build.artifact, buildName: build.name, projectPath: build.path, createdAt: new Date().toISOString() }), { flag: 'wx' });
+              await fs.rename(temporary, path.join(dataDir, 'artifacts', `${build.id}${extension}`));
+              build.artifact = { name: `${build.project}-${build.id.slice(0, 8)}${extension}`, bytes: artifactStat.size };
+              await fs.writeFile(path.join(dataDir, 'artifacts', `${build.id}.json`), JSON.stringify({ id: build.id, ...build.artifact, sourceName: path.basename(artifact), combined: /(?:merged|merged-flash)\.bin$/.test(artifact), buildName: build.name, projectPath: build.path, createdAt: new Date().toISOString() }), { flag: 'wx' });
               io.emit('artifacts:changed');
             } finally { await fs.unlink(temporary).catch(() => {}); }
           } else appendLog(build, 'Build succeeded. No firmware.bin was produced.\n', 'system');
@@ -345,7 +361,193 @@ export async function createCompileZ(options = {}) {
     }
   }
 
+  async function serialDevices() {
+    if (process.platform !== 'linux') throw new Error('Server USB discovery currently requires Linux');
+    const entries = await fs.readdir('/sys/class/tty');
+    const devices = await Promise.all(entries.filter((name) => /^(ttyUSB|ttyACM)\d+$/.test(name)).map(async (name) => {
+      const port = `/dev/${name}`;
+      let device;
+      try { device = await fs.realpath(`/sys/class/tty/${name}/device`); }
+      catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+      const details = {};
+      while (device.startsWith('/sys/devices/')) {
+        for (const key of ['product', 'manufacturer', 'serial', 'idVendor', 'idProduct']) {
+          if (details[key]) continue;
+          try { details[key] = (await fs.readFile(path.join(device, key), 'utf8')).trim(); }
+          catch (error) { if (error.code !== 'ENOENT') throw error; }
+        }
+        if (details.idVendor) break;
+        device = path.dirname(device);
+      }
+      return { port, name: details.product || 'USB serial device', manufacturer: details.manufacturer || '', serial: details.serial || '', vendorId: details.idVendor || '', productId: details.idProduct || '' };
+    }));
+    return devices.filter(Boolean).sort((first, second) => first.port.localeCompare(second.port));
+  }
+
+  function flashParameters(value, tool) {
+    if (typeof value !== 'string' || value.length > 2048) throw new Error('Extra parameters must be text of at most 2048 characters');
+    const tokens = value.trim() ? value.trim().split(/\s+/) : [];
+    const before = [];
+    const after = [];
+    const espOptions = {
+      '--before': /^(default_reset|usb_reset|no_reset|no_reset_no_sync)$/,
+      '--after': /^(hard_reset|soft_reset|no_reset|no_reset_stub)$/,
+      '--connect-attempts': /^[1-9]\d?$/,
+      '--flash_mode': /^(keep|qio|qout|dio|dout)$/,
+      '--flash_freq': /^(keep|80m|60m|48m|40m|30m|26m|24m|20m|16m|15m|12m)$/,
+      '--flash_size': /^(keep|detect|256KB|512KB|[1248]MB|16MB|32MB|64MB|128MB|2MB-c1|4MB-c1)$/,
+      '--spi-connection': /^(SPI|HSPI|\d+,\d+,\d+,\d+,\d+)$/
+    };
+    for (let index = 0; index < tokens.length; index++) {
+      const token = tokens[index];
+      if (tool === 'esp') {
+        if (['--compress', '--no-compress'].includes(token)) { after.push(token); continue; }
+        const [flag, ...inline] = token.split('=');
+        const pattern = espOptions[flag];
+        if (!pattern) throw new Error(`Unsupported esptool parameter: ${flag}. Use the dedicated fields for chip, port, baud and offset.`);
+        const argument = inline.length ? inline.join('=') : tokens[++index];
+        if (!argument || !pattern.test(argument)) throw new Error(`Invalid value for ${flag}`);
+        const destination = ['--before', '--after', '--connect-attempts'].includes(flag) ? before : after;
+        destination.push(flag, argument);
+      } else {
+        if (['-v', '-D'].includes(token)) { before.push(token); continue; }
+        if (!['-B', '-i'].includes(token)) throw new Error(`Unsupported avrdude parameter: ${token}. Allowed: -v, -D, -B <bitclock>, -i <delay>.`);
+        const argument = tokens[++index];
+        if (!argument || !/^\d+(?:\.\d+)?$/.test(argument) || Number(argument) <= 0) throw new Error(`Invalid value for ${token}`);
+        before.push(token, argument);
+      }
+    }
+    return { before, after };
+  }
+
+  function appendFlashLog(flash, text, stream = 'system') {
+    if (!text) return;
+    const entry = { sequence: ++flash.logSequence, text: text.slice(0, 8192), stream, timestamp: Date.now() };
+    flash.logs.push(entry);
+    if (flash.logs.length > 400) flash.logs.shift();
+    io.emit('flash:log', { flashId: flash.id, entry });
+  }
+
+  async function startFlash(flash, parameters, image) {
+    let child;
+    let timeout;
+    try {
+      timeout = setTimeout(() => {
+        if (!activeStatuses.has(flash.status)) return;
+        flash.status = 'cancelling';
+        flash.step = 'Upload timed out after 10 minutes';
+        appendFlashLog(flash, `${flash.step}\n`, 'stderr');
+        const record = processes.get(flash.id);
+        if (record) {
+          signalGroup(record.child, 'SIGTERM');
+          record.killTimer = setTimeout(() => signalGroup(record.child, 'SIGKILL'), 2500);
+        }
+        publish();
+      }, 600_000);
+      for (const stub of flash.tool === 'esp' ? [true, false] : [false]) {
+        if (flash.status === 'cancelling' || closing) break;
+        flash.step = flash.tool === 'esp' ? stub ? 'Uploading with ESP stub' : 'Retrying without ESP stub' : 'Uploading with avrdude';
+        const command = flash.tool === 'esp' ? process.env.ESPTOOL_COMMAND || 'esptool.py' : process.env.AVRDUDE_COMMAND || 'avrdude';
+        const args = flash.tool === 'esp'
+          ? ['--chip', flash.board, '--port', flash.port, '--baud', String(flash.baud), ...parameters.before, ...(!stub ? ['--no-stub'] : []), 'write_flash', ...parameters.after, flash.offset, image]
+          : ['-p', flash.board, '-c', flash.programmer, '-P', flash.port, '-b', String(flash.baud), ...parameters.before, '-U', `flash:w:${image}:${flash.extension === '.hex' ? 'i' : 'r'}`];
+        appendFlashLog(flash, `$ ${[command, ...args].map((part) => JSON.stringify(part)).join(' ')}\n`);
+        publish();
+        const outcome = await new Promise((resolve) => {
+          child = spawn(command, args, { detached: true, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, PYTHONUNBUFFERED: '1', TERM: 'dumb' } });
+          processes.set(flash.id, { child });
+          for (const stream of ['stdout', 'stderr']) {
+            const decoder = new StringDecoder('utf8');
+            child[stream].on('data', (chunk) => appendFlashLog(flash, decoder.write(chunk), stream));
+            child[stream].on('end', () => appendFlashLog(flash, decoder.end(), stream));
+          }
+          child.once('error', (error) => resolve({ code: null, error }));
+          child.once('close', (code, signal) => resolve({ code, signal }));
+        });
+        clearTimeout(processes.get(flash.id)?.killTimer);
+        signalGroup(child, 'SIGKILL');
+        processes.delete(flash.id);
+        if (flash.status === 'cancelling' || closing) break;
+        if (outcome.error) throw new Error(`Cannot start ${command}: ${outcome.error.message}. Install the upload tool on the compiler machine.`);
+        if (outcome.code === 0) {
+          flash.status = 'completed';
+          flash.step = 'Firmware uploaded successfully';
+          break;
+        }
+        if (flash.tool === 'esp' && stub && !outcome.signal) {
+          appendFlashLog(flash, `Stub upload failed (exit ${outcome.code}). Retrying once with --no-stub.\n`, 'stderr');
+          continue;
+        }
+        throw new Error(`Upload failed (${outcome.signal || outcome.code}). See upload output for details.`);
+      }
+    } catch (error) {
+      appendFlashLog(flash, `${error.message}\n`, 'stderr');
+      if (flash.status !== 'cancelling' && !closing) { flash.status = 'failed'; flash.step = error.message; }
+    } finally {
+      clearTimeout(timeout);
+      clearTimeout(processes.get(flash.id)?.killTimer);
+      if (child) signalGroup(child, 'SIGKILL');
+      processes.delete(flash.id);
+      if (flash.status === 'cancelling' || closing && flash.status === 'running') {
+        flash.status = 'cancelled';
+        flash.step = 'Upload stopped; firmware may be incomplete. Reflash before using the device.';
+      }
+      flash.finishedAt = new Date().toISOString();
+      appendFlashLog(flash, `${flash.step}\n`);
+      publish();
+    }
+  }
+
   const route = (handler) => (request, response, next) => Promise.resolve(handler(request, response)).catch(next);
+  app.get('/api/flash/devices', route(async (_request, response) => {
+    response.setHeader('Cache-Control', 'no-store');
+    response.json(await serialDevices());
+  }));
+  app.post('/api/flashes', route(async (request, response) => {
+    if (closing) return response.status(503).json({ error: 'Server is shutting down' });
+    const { artifactId, tool, port, board, programmer = '', offset = '0x0', baud, parameters = '' } = request.body;
+    if (!['esp', 'avr'].includes(tool)) throw new Error('Choose ESP / esptool or AVR / avrdude');
+    if (typeof board !== 'string' || !/^[a-zA-Z0-9_-]{1,48}$/.test(board)) throw new Error('Enter an ESP chip (e.g. esp32 or auto) or AVR part (e.g. m328p)');
+    if (tool === 'avr' && (typeof programmer !== 'string' || !/^[a-zA-Z0-9_-]{1,48}$/.test(programmer))) throw new Error('Enter an avrdude programmer, e.g. arduino or wiring');
+    if (!Number.isInteger(baud) || baud < 1200 || baud > 4_000_000) throw new Error('Baud rate must be an integer between 1200 and 4000000');
+    if (tool === 'esp' && (typeof offset !== 'string' || !/^(?:0x[0-9a-fA-F]{1,8}|\d{1,10})$/.test(offset) || Number(offset) > 0xffffffff)) throw new Error('Enter a valid flash offset, e.g. 0x0 or 0x10000');
+    const parsed = flashParameters(parameters, tool);
+    const artifact = await archivedArtifact(artifactId);
+    if (!artifact) return response.status(404).json({ error: 'Saved firmware not found' });
+    if (tool === 'esp' && artifact.extension !== '.bin') throw new Error('ESP uploads require a .bin image');
+    if (!(await serialDevices()).some((device) => device.port === port)) throw new Error('Choose a USB serial device connected to the compiler machine; refresh the list');
+    if (!(await fs.stat(port)).isCharacterDevice()) throw new Error('The selected port is not a serial device');
+    try { await fs.access(port, constants.R_OK | constants.W_OK); }
+    catch (error) { throw new Error(`Cannot access ${port}: ${error.message}. Give the service account dialout access and restart CompileZ.`); }
+    if (closing) return response.status(503).json({ error: 'Server is shutting down' });
+    if (flashes.some((flash) => activeStatuses.has(flash.status))) return response.status(409).json({ error: 'Another upload is active. Wait for it to finish or stop it first.' });
+    const flash = { id: randomUUID(), artifactId, name: artifact.buildName, extension: artifact.extension, tool, port, board, programmer, offset, baud, parameters, status: 'running', step: 'Preparing upload', startedAt: new Date().toISOString(), finishedAt: null, logs: [], logSequence: 0 };
+    flashes.unshift(flash);
+    flashes.splice(10);
+    publish();
+    void startFlash(flash, parsed, path.resolve(dataDir, 'artifacts', `${artifact.id}${artifact.extension}`));
+    response.status(202).json({ id: flash.id });
+  }));
+  app.get('/api/flashes/:id/logs', (request, response) => {
+    const flash = flashes.find((item) => item.id === request.params.id);
+    if (!flash) return response.status(404).json({ error: 'Upload not found' });
+    response.json({ logs: flash.logs });
+  });
+  app.post('/api/flashes/:id/cancel', (request, response) => {
+    const flash = flashes.find((item) => item.id === request.params.id);
+    if (!flash) return response.status(404).json({ error: 'Upload not found' });
+    if (flash.status === 'running') {
+      flash.status = 'cancelling';
+      flash.step = 'Stopping upload; the device may need reflashing';
+      const record = processes.get(flash.id);
+      if (record) {
+        signalGroup(record.child, 'SIGTERM');
+        record.killTimer = setTimeout(() => signalGroup(record.child, 'SIGKILL'), 2500);
+      }
+      publish();
+    }
+    response.json({ status: flash.status });
+  });
   app.get('/api/state', (_request, response) => response.json(snapshot()));
   app.get('/api/stats', (_request, response) => response.json(statisticsSnapshot()));
   app.get('/api/directories', route(async (request, response) => {
@@ -444,13 +646,13 @@ export async function createCompileZ(options = {}) {
   });
   app.get('/api/artifacts', route(async (_request, response) => {
     const entries = await fs.readdir(path.join(dataDir, 'artifacts'));
-    const artifacts = await Promise.all(entries.filter((entry) => entry.endsWith('.bin')).map((entry) => archivedArtifact(entry.slice(0, -4))));
+    const artifacts = await Promise.all([...new Set(entries.filter((entry) => /\.(bin|hex)$/.test(entry)).map((entry) => entry.slice(0, -4)))].map((id) => archivedArtifact(id)));
     response.json(artifacts.filter(Boolean).sort((first, second) => second.createdAt.localeCompare(first.createdAt)));
   }));
   app.get('/api/builds/:id/artifact', route(async (request, response) => {
     const artifact = await archivedArtifact(request.params.id);
     if (!artifact) return response.status(404).json({ error: 'No firmware artifact available' });
-    response.download(path.join(dataDir, 'artifacts', `${artifact.id}.bin`), artifact.name);
+    response.download(path.join(dataDir, 'artifacts', `${artifact.id}${artifact.extension}`), artifact.name);
   }));
   app.use('/vendor', express.static(path.join(baseDir, 'node_modules/lucide/dist/umd'), { maxAge: '1d' }));
   app.use(express.static(path.join(baseDir, 'public')));

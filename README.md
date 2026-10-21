@@ -1,6 +1,6 @@
 # CompileZ
 
-A self-hosted firmware build station for a local-network Intel NUC. Project selection is private to each browser tab. Socket.IO synchronizes build history, build-ID-specific output, hardware telemetry, and all-time statistics. Successful firmware is permanently archived independently of history. The frontend uses locally compiled Tailwind CSS, Lucide icons, and locally hosted fonts.
+A self-hosted firmware build and USB flash station for a local-network Intel NUC. Project selection is private to each browser tab. Socket.IO synchronizes build history, build-ID-specific output, upload jobs, hardware telemetry, and all-time statistics. Successful firmware is permanently archived independently of history. The frontend uses locally compiled Tailwind CSS, Lucide icons, and locally hosted fonts.
 
 ## Run locally
 
@@ -87,7 +87,33 @@ void loop() {
 
 ### Build and download
 
-Enter a build name, click **COMPILE**, and inspect the output for that Build ID. A successful firmware-producing build gets a **Download .bin** link. No ESP32 needs to be connected to the NUC to compile; CompileZ does not automatically flash the device. Choose the correct flashing method and firmware image for your board.
+Enter a build name, click **COMPILE**, and inspect the output for that Build ID. A successful firmware-producing build gets a firmware download link. No board needs to be connected to compile. Use the **Flash** tab to upload a previously saved image to a USB-connected board; compiling never automatically flashes a device.
+
+## Flash saved firmware
+
+The **Flash** tab uploads archived images directly from the **compiler machine**, not through browser Web Serial. USB discovery currently supports Linux `/dev/ttyUSB*` and `/dev/ttyACM*` devices. Connect the board with a data-capable cable, refresh the USB selector, then select saved firmware and its matching upload tool. The saved-image selector includes binaries from builds whose history was deleted or pruned. Firmware/USB selection and form edits stay local to your browser; upload jobs and output are shared.
+
+- **ESP / esptool:** choose the chip (`auto`, `esp8266`, `esp32`, `esp32s3`, etc.), baud rate, image layout and offset. Merged images default to `0x0`; verify the image's intended base address. Unmerged or legacy images require an explicit layout/offset selection. A normal ESP32 `firmware.bin` is usually application-only at `0x10000` and cannot provision a blank board without matching bootloader/partition data. ESP8266 images usually start at `0x0`. The layout selector does **not** merge or convert images; CompileZ archives merged binaries if your project produces one.
+- **Arduino AVR / avrdude:** choose the AVR part, serial bootloader/programmer and baud. Uno: `m328p` / `arduino` / `115200`; older Nano bootloader: `m328p` / `arduino` / `57600`; Mega: `m2560` / `wiring` / `115200`. `.hex` archives are read as Intel HEX and `.bin` as raw binary. Flash memory is written and verified; fuses and EEPROM are not changed. Non-AVR Arduino families (such as SAMD, RP2040 and Renesas) are not supported by this mode.
+- **Additional parameters:** esptool accepts `--before`, `--after`, `--connect-attempts`, `--spi-connection`, `--flash_mode`, `--flash_freq`, `--flash_size`, `--compress` and `--no-compress`. Example: `--before default_reset --after hard_reset --flash_mode dio --flash_freq 40m --flash_size detect`. Values can be space-separated or use `--option=value`. AVR accepts `-v`, `-D`, `-B <bitclock>` and `-i <delay>`. Parameters are validated arguments, not shell commands; arbitrary commands, additional images, memory/fuse writes and overrides of dedicated fields are rejected.
+- ESP uploads always attempt the RAM stub first. A failed attempt retries **once** with `--no-stub`. Missing executables, process termination, cancellation and shutdown do not trigger a retry. A second failure is shown explicitly in the upload output.
+- Only one upload runs at a time across all clients, independently of compiler workers. Close other serial monitors/tools first. Confirm the selected image, port, board and offset before overwriting firmware. Hold BOOT/reset into the bootloader if your board cannot enter it automatically.
+- **Stop** terminates the upload process group, escalating after 2.5 seconds. Uploads have a ten-minute timeout. A stopped, failed or interrupted upload can leave incomplete firmware: reflash before using the device. Do not disconnect USB during an upload.
+
+The latest ten upload jobs, with up to 400 log chunks (8 KB each), are saved alongside build history. Restarted active uploads become `interrupted` and are never resumed automatically. These jobs do not affect build statistics.
+
+### Upload tools and USB permissions
+
+Rerunning the Debian installer installs esptool 4.x and avrdude, adds the service account to `dialout`, and restarts the service. For an existing manual Linux installation:
+
+```bash
+.venv/bin/python -m pip install 'esptool>=4.8,<5'
+sudo apt-get install avrdude
+# Replace compilez with the actual account running the server.
+sudo usermod -a -G dialout compilez
+```
+
+Restart the service (or log out/in for an interactive account) after changing groups. Export `ESPTOOL_COMMAND="$PWD/.venv/bin/esptool.py"` when running locally with that virtual environment. `AVRDUDE_COMMAND` defaults to `avrdude` on the server's PATH. esptool 4.x is required for the supported underscore-style command/parameter names; do not point this setting at an incompatible CLI. Permission errors are reported before starting an upload. Some boards need vendor-specific udev rules; do not fix permissions with `chmod 777` or run the service as root.
 
 ## Build your project
 
@@ -105,7 +131,7 @@ Browse the **server's** filesystem or enter an absolute path, then enter a requi
 
 ### All-time statistics
 
-The **Dashboard** and **Stats** tabs switch your local view without interrupting builds. Every client receives updated global statistics when builds finish. Metrics include total builds, cumulative build time, longest and average build time, successful/failed counts and percentages, and the most compiled canonical project directory.
+The **Compile**, **Flash** and **Stats** tabs switch your local view without interrupting builds or uploads. Every client receives updated global statistics when builds finish. Metrics include total builds, cumulative build time, longest and average build time, successful/failed counts and percentages, and the most compiled canonical project directory.
 
 Statistics are written atomically to `stats.json` in `DATA_DIR` (normally `.data/stats.json`, or `/var/lib/compilez/stats.json` under systemd). This file is independent of the 50-entry history, so totals survive history deletion, pruning, and restart. On first upgrade, retained finished history is imported once; builds that were already deleted or pruned before this feature cannot be recovered. Old entries use their project name until new named builds are submitted.
 
@@ -119,7 +145,7 @@ Files are limited to 64 KB and config symlinks are rejected. Saves include the r
 
 ### Saved firmware and storage
 
-Every successful firmware-producing build gets an independent archived copy before the next build for that directory starts. Firmware is discovered at `firmware.bin`, `build/firmware.bin`, `dist/firmware.bin`, or `.pio/build/<environment>/firmware.bin`. A valid successful build's binary is not rejected merely because its modification time is old. Symlinks outside the project are still rejected. With multiple environments, the newest matching firmware is selected; use separate projects if you need individually selectable environment artifacts. Successful builds that produce no binary have no download.
+Every successful firmware-producing build gets an independent archived copy before the next build for that directory starts. Firmware is discovered in the project root, `build/`, `dist/`, or `.pio/build/<environment>/`. Supported names are `firmware.bin`, `firmware.hex`, `firmware.merged.bin`, `merged-flash.bin` and `merged.bin`. The newest matching file is archived, preferring merged images on equal modification times. A valid successful build's image is not rejected merely because its modification time is old. Symlinks outside the project are still rejected. With multiple environments, use separate projects if you need individually selectable environment artifacts. Successful builds that produce no supported firmware image have no download. Existing archives are not automatically converted to merged images.
 
 With the default systemd installation:
 
@@ -129,7 +155,7 @@ With the default systemd installation:
 /var/lib/compilez/artifacts/<Build-ID>.json               archive metadata
 ```
 
-Local development uses `.data/artifacts/` unless `DATA_DIR` is set. Rebuilding can replace or clean the project's `.pio` output, but not the archived Build-ID copies. **Old binaries remain saved when history entries are deleted, pruned, or the server restarts.** Open **Stats > Saved firmware** to download them even after they disappear from the build queue. Existing `.bin` files without metadata are also listed by ID. Files already deleted by older releases cannot be recovered by this update.
+Local development uses `.data/artifacts/` unless `DATA_DIR` is set. AVR archives retain the `.hex` extension instead of `.bin`. Rebuilding can replace or clean the project's `.pio` output, but not the archived Build-ID copies. **Old binaries remain saved when history entries are deleted, pruned, or the server restarts.** Open **Stats > Saved firmware** to download them or **Flash** to upload them even after they disappear from the build queue. Existing `.bin`/`.hex` files without metadata are also listed by ID. Files already deleted by older releases cannot be recovered by this update.
 
 There is no automatic archive expiry. Back up `DATA_DIR` and monitor free disk space. Only an administrator manually removing archive files deletes them. The archive is shared with authorized dashboard users, not private per-user storage.
 
@@ -143,7 +169,7 @@ On the NUC, from this project directory:
 sudo bash setup.sh
 ```
 
-The installer installs system build dependencies, Node.js 22/npm, and PlatformIO in a Python virtual environment. It deploys the application to `/opt/compilez`, runs `npm ci` (or `npm install` without a lockfile), builds local CSS, creates `/etc/compilez.env`, then creates, enables, and starts `compilez.service`.
+The installer installs system build dependencies, avrdude, Node.js 22/npm, and PlatformIO plus esptool 4.x in a Python virtual environment. It grants the service account `dialout` membership for USB serial access. It deploys the application to `/opt/compilez`, runs `npm ci` (or `npm install` without a lockfile), builds local CSS, creates `/etc/compilez.env`, then creates, enables, and starts `compilez.service`.
 
 The service runs as the invoking `sudo` user, or a dedicated `compilez` user when installed directly as root. Override with `sudo COMPILEZ_USER=builder bash setup.sh`. That account needs read/write/traverse access to the selected projects and their parent directories. The installer does not change ownership of your project directories. Rerunning setup preserves the environment file and build history. `INSTALL_DIR` may specify a dedicated installation directory without spaces.
 
@@ -174,6 +200,8 @@ Real-time scheduling (`rr`) is intentionally not used: it can starve essential s
 | `MAX_CONCURRENT_BUILDS` | `2` | 1 to 16 workers; same-path builds still serialize |
 | `DATA_DIR` | `.data` in application directory | History and copied firmware |
 | `PIO_COMMAND` | `pio` | PlatformIO executable, no shell arguments |
+| `ESPTOOL_COMMAND` | `esptool.py` | esptool 4.x executable for ESP uploads, no shell arguments |
+| `AVRDUDE_COMMAND` | `avrdude` | AVR uploader executable, no shell arguments |
 | `COMPILEZ_TOKEN` | unset in local development | Optional HTTP Basic password; username `compilez` |
 
 Selections are never restored from shared server history. `PROJECT_PATH` provides only a default; a tab's own valid saved path takes precedence. An unavailable default falls back to the first browse root. Environment variables must be exported to Node; `.env.example` is a reference, not automatically loaded. For local development with a configuration file, use `node --env-file=.env server.js` on Node 22. The systemd installation reads `/etc/compilez.env` instead. Existing installations keep their environment file on upgrade; replace old defaults pointing at removed projects with your real project or `/opt/compilez/spaces`.
@@ -182,7 +210,7 @@ If a build reports `spawn pio ENOENT`, verify `/opt/compilez/.venv/bin/pio --ver
 
 ## Security boundary
 
-**This is a trusted-code execution service, not a compiler sandbox.** Anyone with dashboard access can execute a selected project's build script with the service account's permissions. Directory restrictions limit the picker and submitted working directories, not what compiler scripts can read/write. Review projects before building and do not expose the service to the internet. Direct `npm start` has no authentication unless `COMPILEZ_TOKEN` is set. Installed deployments enable authentication by default. HTTP Basic credentials need HTTPS outside a trusted network; use a TLS reverse proxy for such access. Same-origin checks protect browser mutations and Socket.IO connections; they are not a replacement for authentication. Do not run the service as root.
+**This is a trusted-code execution service, not a compiler sandbox.** Anyone with dashboard access can execute a selected project's build script with the service account's permissions, and can overwrite firmware on connected USB serial devices. Directory restrictions limit the picker and submitted working directories, not what compiler scripts can read/write. Review projects and firmware before building/flashing and do not expose the service to the internet. Direct `npm start` has no authentication unless `COMPILEZ_TOKEN` is set. Installed deployments enable authentication by default. HTTP Basic credentials need HTTPS outside a trusted network; use a TLS reverse proxy for such access. Same-origin checks protect browser mutations and Socket.IO connections; they are not a replacement for authentication. Do not run the service as root.
 
 ## Development and checks
 

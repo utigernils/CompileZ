@@ -20,7 +20,12 @@ let configNeedsReload = true;
 let savingConfig = false;
 let configError = '';
 let deleteId = null;
+let savedArtifacts = [];
+let selectedFlashId = null;
+let flashSubmitting = false;
+let devicesLoading = false;
 const logCache = new Map();
+const flashLogCache = new Map();
 const samples = { cpu: [], temperature: [], memory: [] };
 const socket = io({ reconnectionDelayMax: 3000 });
 const escapeHtml = (text) => String(text ?? '').replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
@@ -54,9 +59,10 @@ function setConnection(value) {
   $('#stop-button').disabled = !value || selectedBuild()?.status === 'cancelling';
   $('#confirm-delete').disabled = !value;
   renderConfigControls();
+  renderFlashControls();
 }
 
-socket.on('connect', () => { configNeedsReload = true; setConnection(true); void loadArtifacts(); });
+socket.on('connect', () => { configNeedsReload = true; setConnection(true); void loadArtifacts(); if (!$('#flash-view').hidden) void loadFlashDevices(); });
 socket.on('disconnect', () => setConnection(false));
 socket.on('connect_error', () => setConnection(false));
 socket.on('state', (next) => {
@@ -79,6 +85,7 @@ socket.on('state', (next) => {
   renderTerminalHeading();
   renderWorkers();
   renderBuildStatistics();
+  renderFlashes();
   if (!selectedId) renderLogs();
   if (selectedId) void loadLogs(selectedId);
 });
@@ -105,6 +112,10 @@ socket.on('build:update', ({ id, step, progress }) => {
   const preview = document.querySelector(`[data-step="${id}"]`);
   if (preview) { preview.textContent = step; preview.title = step; }
   if (id === selectedId) renderTerminalHeading();
+});
+socket.on('flash:log', ({ flashId, entry }) => {
+  mergeLogs(flashId, [entry], flashLogCache);
+  if (selectedFlashId === flashId) renderFlashLogs();
 });
 
 function graph(id, values, color, maximum) {
@@ -214,10 +225,19 @@ function renderBuildStatistics() {
 async function loadArtifacts() {
   try {
     const artifacts = await api('/api/artifacts');
+    savedArtifacts = artifacts;
+    const selectedImage = $('#flash-image').value;
+    $('#flash-image').innerHTML = '<option value="">Select saved firmware...</option>' + artifacts.map((artifact) => `<option value="${artifact.id}">${escapeHtml(artifact.buildName)} / ${escapeHtml(timestamp(artifact.createdAt))} / ${escapeHtml(artifact.extension || '.bin')}${artifact.combined ? ' / merged' : ''}</option>`).join('');
+    $('#flash-image').value = artifacts.some((artifact) => artifact.id === selectedImage) ? selectedImage : '';
+    renderFlashImageInfo();
     $('#archive-count').textContent = `${artifacts.length} files`;
-    $('#firmware-list').innerHTML = artifacts.length ? artifacts.map((artifact) => `<div class="firmware-item"><div><strong>${escapeHtml(artifact.buildName)}</strong><p class="mono">${escapeHtml(artifact.projectPath || artifact.id)}</p><span>${escapeHtml(timestamp(artifact.createdAt))} / ${(artifact.bytes / 1024).toFixed(1)} KB</span></div><a class="archive-download" href="/api/builds/${artifact.id}/artifact" aria-label="Download ${escapeHtml(artifact.buildName)} firmware"><i data-lucide="download"></i> .bin</a></div>`).join('') : '<p class="archive-empty">No saved firmware</p>';
+    $('#firmware-list').innerHTML = artifacts.length ? artifacts.map((artifact) => `<div class="firmware-item"><div><strong>${escapeHtml(artifact.buildName)}</strong><p class="mono">${escapeHtml(artifact.projectPath || artifact.id)}</p><span>${escapeHtml(timestamp(artifact.createdAt))} / ${(artifact.bytes / 1024).toFixed(1)} KB</span></div><a class="archive-download" href="/api/builds/${artifact.id}/artifact" aria-label="Download ${escapeHtml(artifact.buildName)} firmware"><i data-lucide="download"></i> ${escapeHtml(artifact.extension || '.bin')}</a></div>`).join('') : '<p class="archive-empty">No saved firmware</p>';
     icons();
-  } catch (error) { $('#firmware-list').textContent = error.message; }
+  } catch (error) {
+    $('#firmware-list').textContent = error.message;
+    $('#flash-image-info').textContent = `Cannot load firmware: ${error.message}`;
+    toast(error.message, true);
+  }
 }
 $('#refresh-archive').addEventListener('click', () => { void loadArtifacts(); });
 
@@ -234,17 +254,17 @@ function renderQueue() {
     const name = escapeHtml(build.name || build.project);
     const finished = !activeStates.has(build.status) && build.status !== 'queued';
     const timing = `Started: ${build.startedAt || 'not started'}${build.finishedAt ? ` | Finished: ${build.finishedAt}` : ''}`;
-    return `<article class="build-item ${build.id === selectedId ? 'selected' : ''} ${build.status}"><button class="build-select" data-build="${build.id}" aria-label="View ${name} ${labels[build.status]} build" aria-pressed="${build.id === selectedId}"><div class="build-item-top"><span class="build-item-icon ${build.status}"><i data-lucide="${statusIcons[build.status]}"></i></span><span class="build-project-name" title="${name}">${name}</span></div><div class="build-item-meta"><span class="build-label ${build.status}">${labels[build.status]}</span><span class="mono">#${build.id.slice(0, 8)}</span><span class="build-time" data-duration="${build.id}">${duration(build)}</span></div><div class="build-timestamp" title="${escapeHtml(timing)}">${build.startedAt ? `<time datetime="${build.startedAt}">${escapeHtml(timestamp(build.startedAt))}</time>` : 'Not started'}</div><div class="build-step" data-step="${build.id}" title="${escapeHtml(build.step)}">${escapeHtml(build.step)}</div>${activeStates.has(build.status) ? '<div class="queue-progress"><span></span></div>' : ''}</button>${build.artifact ? `<a class="artifact-link" href="/api/builds/${build.id}/artifact"><i data-lucide="download"></i> Download .bin <span>${(build.artifact.bytes / 1024).toFixed(1)} KB</span></a>` : ''}${build.status === 'queued' ? `<button class="cancel-queued" data-cancel="${build.id}" title="Cancel queued build" aria-label="Cancel queued ${name} build"><i data-lucide="x"></i></button>` : ''}${finished ? `<button class="delete-build icon-button" data-delete="${build.id}" title="Delete build" aria-label="Delete ${name}"><i data-lucide="trash-2"></i></button>` : ''}</article>`;
+    return `<article class="build-item ${build.id === selectedId ? 'selected' : ''} ${build.status}"><button class="build-select" data-build="${build.id}" aria-label="View ${name} ${labels[build.status]} build" aria-pressed="${build.id === selectedId}"><div class="build-item-top"><span class="build-item-icon ${build.status}"><i data-lucide="${statusIcons[build.status]}"></i></span><span class="build-project-name" title="${name}">${name}</span></div><div class="build-item-meta"><span class="build-label ${build.status}">${labels[build.status]}</span><span class="mono">#${build.id.slice(0, 8)}</span><span class="build-time" data-duration="${build.id}">${duration(build)}</span></div><div class="build-timestamp" title="${escapeHtml(timing)}">${build.startedAt ? `<time datetime="${build.startedAt}">${escapeHtml(timestamp(build.startedAt))}</time>` : 'Not started'}</div><div class="build-step" data-step="${build.id}" title="${escapeHtml(build.step)}">${escapeHtml(build.step)}</div>${activeStates.has(build.status) ? '<div class="queue-progress"><span></span></div>' : ''}</button>${build.artifact ? `<a class="artifact-link" href="/api/builds/${build.id}/artifact"><i data-lucide="download"></i> Download ${escapeHtml(build.artifact.name?.endsWith('.hex') ? '.hex' : '.bin')} <span>${(build.artifact.bytes / 1024).toFixed(1)} KB</span></a>` : ''}${build.status === 'queued' ? `<button class="cancel-queued" data-cancel="${build.id}" title="Cancel queued build" aria-label="Cancel queued ${name} build"><i data-lucide="x"></i></button>` : ''}${finished ? `<button class="delete-build icon-button" data-delete="${build.id}" title="Delete ${name}"><i data-lucide="trash-2"></i></button>` : ''}</article>`;
   }).join('') : `<div class="queue-empty"><div class="empty-stack"><i data-lucide="${filter === 'all' ? 'layers-2' : 'list-filter'}"></i></div><h3>${filter === 'all' ? 'No builds yet' : `No ${filter} builds`}</h3></div>`;
   icons();
 }
 
-function mergeLogs(id, logs) {
-  const entries = logCache.get(id) || new Map();
+function mergeLogs(id, logs, cache = logCache) {
+  const entries = cache.get(id) || new Map();
   for (const entry of logs) entries.set(entry.sequence, entry);
   const sequences = [...entries.keys()].sort((first, second) => first - second);
   for (const sequence of sequences.slice(0, Math.max(0, sequences.length - 400))) entries.delete(sequence);
-  logCache.set(id, entries);
+  cache.set(id, entries);
 }
 
 async function loadLogs(id) {
@@ -379,15 +399,18 @@ function switchView(view) {
     tab.setAttribute('aria-selected', selected);
     tab.tabIndex = selected ? 0 : -1;
   });
-  $('#compile-view').hidden = view !== 'compile';
-  $('#stats-view').hidden = view !== 'stats';
+  $$('[role="tabpanel"]').forEach((panel) => { panel.hidden = panel.id !== `${view}-view`; });
+  document.title = `CompileZ / ${view === 'flash' ? 'Flash' : view === 'stats' ? 'Stats' : 'Compile'}`;
+  if (view === 'flash') { void loadArtifacts(); void loadFlashDevices(); }
 }
 $$('[data-view]').forEach((tab) => {
   tab.addEventListener('click', () => switchView(tab.dataset.view));
   tab.addEventListener('keydown', (event) => {
     if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
     event.preventDefault();
-    const view = event.key === 'Home' ? 'compile' : event.key === 'End' ? 'stats' : tab.dataset.view === 'compile' ? 'stats' : 'compile';
+    const views = $$('[data-view]').map((item) => item.dataset.view);
+    const index = views.indexOf(tab.dataset.view);
+    const view = event.key === 'Home' ? views[0] : event.key === 'End' ? views.at(-1) : views[(index + (event.key === 'ArrowRight' ? 1 : views.length - 1)) % views.length];
     switchView(view);
     $(`#${view}-tab`).focus();
   });
@@ -522,9 +545,156 @@ $('#save-config').addEventListener('click', async () => {
   } catch (error) { toast(error.message, true); }
   finally { savingConfig = false; renderConfigControls(); }
 });
+
+function renderFlashControls() {
+  const busy = (state.flashes || []).find((flash) => activeStates.has(flash.status));
+  const selected = (state.flashes || []).find((flash) => flash.id === selectedFlashId);
+  const artifact = savedArtifacts.find((item) => item.id === $('#flash-image').value);
+  const incompatible = $('#flash-tool').value === 'esp' && artifact?.extension === '.hex';
+  $('#flash-button').disabled = !connected || flashSubmitting || Boolean(busy) || !artifact || !$('#flash-device').value || incompatible;
+  $('#flash-stop').hidden = !selected || !activeStates.has(selected.status);
+  $('#flash-stop').disabled = !connected || selected?.status === 'cancelling';
+  $('#refresh-flash-devices').disabled = !connected || devicesLoading;
+  $('#refresh-flash-images').disabled = !connected;
+  $('#flash-ready').textContent = !connected ? 'Waiting for server connection' : busy ? `Upload active on ${busy.port}` : flashSubmitting ? 'Starting upload...' : incompatible ? 'ESP uploads need a .bin image' : !artifact || !$('#flash-device').value ? 'Select firmware and a USB device' : 'Ready / existing firmware will be overwritten';
+}
+
+function renderFlashImageInfo() {
+  const artifact = savedArtifacts.find((item) => item.id === $('#flash-image').value);
+  $('#flash-image-info').textContent = artifact
+    ? `${artifact.sourceName || artifact.name} / ${(artifact.bytes / 1024).toFixed(1)} KB / ${artifact.projectPath || artifact.id}${artifact.combined ? ' / merged image' : ' / verify the image layout and offset'}`
+    : savedArtifacts.length ? 'Select a previously compiled image. No rebuild required.' : 'No saved firmware yet. Compile a project that produces firmware.bin, a merged .bin, or firmware.hex.';
+  renderFlashControls();
+}
+
+async function loadFlashDevices() {
+  if (devicesLoading) return;
+  devicesLoading = true;
+  const selected = $('#flash-device').value;
+  $('#flash-device-info').textContent = 'Scanning compiler machine USB serial ports...';
+  renderFlashControls();
+  try {
+    const devices = await api('/api/flash/devices');
+    $('#flash-device').innerHTML = '<option value="">Select USB device...</option>' + devices.map((device) => `<option value="${escapeHtml(device.port)}">${escapeHtml(device.port)} / ${escapeHtml(device.name)}${device.serial ? ` / ${escapeHtml(device.serial)}` : ''}</option>`).join('');
+    $('#flash-device').value = devices.some((device) => device.port === selected) ? selected : devices.length === 1 ? devices[0].port : '';
+    $('#flash-device-info').textContent = devices.length ? `${devices.length} USB serial ${devices.length === 1 ? 'device' : 'devices'} on the compiler machine. Refresh after plugging in a board.` : 'No USB serial devices found. Connect a board with a data cable and refresh.';
+  } catch (error) {
+    $('#flash-device').innerHTML = '<option value="">Device scan failed</option>';
+    $('#flash-device-info').textContent = error.message;
+    toast(error.message, true);
+  } finally { devicesLoading = false; renderFlashControls(); }
+}
+
+function renderFlashLogs() {
+  const entries = [...(flashLogCache.get(selectedFlashId)?.values() || [])].sort((first, second) => first.sequence - second.sequence);
+  const output = $('#flash-output');
+  const atBottom = output.scrollTop + output.clientHeight >= output.scrollHeight - 40;
+  const fragment = document.createDocumentFragment();
+  for (const entry of entries) {
+    const span = document.createElement('span');
+    span.className = `log-${entry.stream}`;
+    span.textContent = cleanOutput(entry.text);
+    fragment.append(span);
+  }
+  $('#flash-log').replaceChildren(fragment);
+  $('#flash-log').hidden = !selectedFlashId;
+  $('#flash-empty').hidden = Boolean(selectedFlashId);
+  if (atBottom) output.scrollTop = output.scrollHeight;
+}
+
+async function loadFlashLogs(id) {
+  try {
+    const result = await api(`/api/flashes/${id}/logs`);
+    mergeLogs(id, result.logs, flashLogCache);
+    if (selectedFlashId === id) renderFlashLogs();
+  } catch (error) { toast(error.message, true); }
+}
+
+function renderFlashes() {
+  const flashes = state.flashes || [];
+  if (!flashes.some((flash) => flash.id === selectedFlashId)) selectedFlashId = null;
+  if (!selectedFlashId && flashes.length) selectedFlashId = flashes[0].id;
+  for (const id of flashLogCache.keys()) if (!flashes.some((flash) => flash.id === id)) flashLogCache.delete(id);
+  const flash = flashes.find((item) => item.id === selectedFlashId);
+  $('#flash-history').innerHTML = flashes.length ? flashes.map((item) => `<button type="button" class="flash-history-item ${item.id === selectedFlashId ? 'selected' : ''}" data-flash="${item.id}" aria-pressed="${item.id === selectedFlashId}"><span class="flash-history-title"><i data-lucide="${statusIcons[item.status]}"></i><strong>${escapeHtml(item.name)}</strong></span><span class="build-label ${item.status}">${labels[item.status]}</span><span class="mono">${escapeHtml(item.port)} / ${escapeHtml(item.board)}</span><span>${escapeHtml(timestamp(item.startedAt))}</span></button>`).join('') : '<p class="archive-empty">No uploads yet</p>';
+  $('#flash-status').textContent = flash ? labels[flash.status].toUpperCase() : 'STANDBY';
+  $('#flash-status').className = `build-status-badge ${flash?.status || ''}`;
+  $('#flash-title').textContent = flash ? `${flash.name} / ${flash.port}` : 'No upload selected';
+  $('#flash-step').textContent = flash?.step || 'ESP uploads try the stub first, then retry without it';
+  $('#flash-elapsed').textContent = duration(flash);
+  renderFlashControls();
+  renderFlashLogs();
+  if (flash) void loadFlashLogs(flash.id);
+  icons();
+}
+
+$('#refresh-flash-images').addEventListener('click', () => { void loadArtifacts(); });
+$('#refresh-flash-devices').addEventListener('click', () => { void loadFlashDevices(); });
+$('#flash-device').addEventListener('change', renderFlashControls);
+$('#flash-image').addEventListener('change', () => {
+  const artifact = savedArtifacts.find((item) => item.id === $('#flash-image').value);
+  $('#flash-layout').value = artifact?.combined ? 'combined' : 'custom';
+  $('#flash-offset').value = artifact?.combined ? '0x0' : '';
+  renderFlashImageInfo();
+});
+$('#flash-layout').addEventListener('change', () => {
+  if ($('#flash-layout').value !== 'custom') $('#flash-offset').value = $('#flash-layout').value === 'application' ? '0x10000' : '0x0';
+});
+$('#flash-offset').addEventListener('input', () => { $('#flash-layout').value = 'custom'; });
+$('#flash-tool').addEventListener('change', () => {
+  const esp = $('#flash-tool').value === 'esp';
+  $('#flash-board-label').textContent = esp ? 'Board / ESP chip' : 'Board / AVR part';
+  $('#flash-board').value = esp ? 'auto' : 'm328p';
+  $('#flash-board-options').innerHTML = (esp ? ['auto', 'esp8266', 'esp32', 'esp32s2', 'esp32s3', 'esp32c3', 'esp32c6', 'esp32h2'] : ['m328p', 'm168', 'm2560', 'm32u4']).map((value) => `<option value="${value}">`).join('');
+  $('#flash-baud').value = esp ? '460800' : '115200';
+  $('#flash-programmer-field').hidden = esp;
+  $('#flash-programmer').required = !esp;
+  $('#flash-layout-field').hidden = !esp;
+  $('#flash-offset-field').hidden = !esp;
+  $('#flash-offset').required = esp;
+  $('#flash-offset').disabled = !esp;
+  $('#flash-parameters').value = '';
+  $('#flash-parameters').placeholder = esp ? '--flash_mode dio --flash_freq 40m --flash_size detect' : '-v -D';
+  $('#flash-parameter-help').textContent = esp ? 'Supports --before, --after, --connect-attempts, --flash_mode, --flash_freq, --flash_size, --spi-connection, --compress and --no-compress. Space-separated values, no shell commands.' : 'Supports -v (verbose), -D (disable auto-erase), -B <bitclock> and -i <delay>. Uno: m328p / arduino / 115200. Old Nano bootloader: 57600. Mega: m2560 / wiring / 115200.';
+  $('#flash-safety-note').textContent = esp ? "Use a merged binary at its intended base address (usually 0x0). A standard ESP32 firmware.bin is application-only, usually at 0x10000, and needs matching bootloader and partitions already on the device. Check your board's layout before flashing." : 'Select the exact AVR part and bootloader for your board. Saved .hex images use Intel HEX format; .bin images use raw binary. This mode writes flash only, not fuses or EEPROM. Non-AVR Arduino boards need a different tool.';
+  renderFlashControls();
+});
+$('#flash-history').addEventListener('click', (event) => {
+  const button = event.target.closest('[data-flash]');
+  if (!button) return;
+  selectedFlashId = button.dataset.flash;
+  renderFlashes();
+});
+$('#flash-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  if ($('#flash-button').disabled) return;
+  const artifact = savedArtifacts.find((item) => item.id === $('#flash-image').value);
+  const body = {
+    artifactId: artifact.id, tool: $('#flash-tool').value, port: $('#flash-device').value,
+    board: $('#flash-board').value.trim(), baud: Number($('#flash-baud').value),
+    programmer: $('#flash-programmer').value.trim(), offset: $('#flash-offset').value.trim(),
+    parameters: $('#flash-parameters').value.trim()
+  };
+  if (!window.confirm(`Overwrite firmware on ${body.port} with "${artifact.buildName}"?\nBoard: ${body.board}${body.tool === 'esp' ? ` / offset: ${body.offset}` : ` / programmer: ${body.programmer}`}\nDo not disconnect the device during upload.`)) return;
+  flashSubmitting = true;
+  renderFlashControls();
+  try {
+    const result = await api('/api/flashes', 'POST', body);
+    selectedFlashId = result.id;
+    if ((state.flashes || []).some((flash) => flash.id === result.id)) renderFlashes();
+    toast('Upload started on the compiler machine');
+  } catch (error) { toast(error.message, true); }
+  finally { flashSubmitting = false; renderFlashControls(); }
+});
+$('#flash-stop').addEventListener('click', async () => {
+  if (!selectedFlashId) return;
+  try { await api(`/api/flashes/${selectedFlashId}/cancel`, 'POST'); toast('Upload stop requested; the device may need reflashing'); }
+  catch (error) { toast(error.message, true); }
+});
 $$('dialog').forEach((dialog) => dialog.addEventListener('click', (event) => { if (event.target === dialog) { const bounds = dialog.getBoundingClientRect(); if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) dialog.close(); } }));
 setInterval(() => {
   $('#elapsed').textContent = duration(selectedBuild());
+  $('#flash-elapsed').textContent = duration((state.flashes || []).find((flash) => flash.id === selectedFlashId));
   $$('[data-duration]').forEach((element) => { const build = state.builds.find((item) => item.id === element.dataset.duration); element.textContent = duration(build); });
 }, 1000);
 icons();

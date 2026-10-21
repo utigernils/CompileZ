@@ -30,7 +30,7 @@
     </section>
 
   <main class="workspace">
-    <nav class="view-tabs" role="tablist" aria-label="Workspace views"><button id="compile-tab" class="view-tab selected" role="tab" aria-selected="true" aria-controls="compile-view" data-view="compile"><i data-lucide="terminal"></i> Compile</button><button id="stats-tab" class="view-tab" role="tab" aria-selected="false" aria-controls="stats-view" tabindex="-1" data-view="stats"><i data-lucide="chart-no-axes-combined"></i> Stats</button></nav>
+    <nav class="view-tabs" role="tablist" aria-label="Workspace views"><button id="compile-tab" class="view-tab selected" role="tab" aria-selected="true" aria-controls="compile-view" data-view="compile"><i data-lucide="terminal"></i> Compile</button><button id="flash-tab" class="view-tab" role="tab" aria-selected="false" aria-controls="flash-view" tabindex="-1" data-view="flash"><i data-lucide="usb"></i> Flash</button><button id="stats-tab" class="view-tab" role="tab" aria-selected="false" aria-controls="stats-view" tabindex="-1" data-view="stats"><i data-lucide="chart-no-axes-combined"></i> Stats</button></nav>
     <section id="compile-view" role="tabpanel" aria-labelledby="compile-tab">
     <div class="page-heading"><h1>Compile</h1></div>
 
@@ -59,6 +59,41 @@
 
       <aside class="queue-panel" id="queue-panel" aria-label="Build queue and history"><div class="queue-heading"><h2><i data-lucide="list-video"></i> Build queue <span id="queue-count">0</span></h2></div><div class="queue-tabs" role="group" aria-label="Filter builds"><button class="queue-tab selected" data-filter="all" aria-pressed="true">All builds</button><button class="queue-tab" data-filter="active" aria-pressed="false">Active <span id="active-count">0</span></button><button class="queue-tab" data-filter="completed" aria-pressed="false">Completed</button></div><div class="queue-list" id="queue-list"><div class="queue-empty"><div class="empty-stack"><i data-lucide="layers-2"></i></div><h3>No builds yet</h3></div></div><div class="queue-summary"><span><span class="summary-dot success"></span><strong id="success-count">0</strong> completed</span><span><span class="summary-dot failed"></span><strong id="failed-count">0</strong> failed</span></div></aside>
     </div>
+    </section>
+
+    <section id="flash-view" role="tabpanel" aria-labelledby="flash-tab" hidden>
+      <div class="page-heading"><h1>Flash</h1><span class="section-meta">USB devices on the build server</span></div>
+      <div class="content-grid">
+        <div class="console-column">
+          <section class="project-section" aria-labelledby="flash-heading">
+            <div class="stats-section-heading"><h2 id="flash-heading"><i data-lucide="microchip"></i> Firmware uploader</h2><span class="section-meta">From archive to device</span></div>
+            <form id="flash-form" class="flash-form">
+              <label class="flash-field flash-wide"><span>Saved firmware / combined binary</span><div class="flash-select-row"><select id="flash-image" required aria-describedby="flash-image-info"><option value="">Loading saved firmware...</option></select><button type="button" id="refresh-flash-images" class="icon-button" title="Refresh saved firmware" aria-label="Refresh saved firmware"><i data-lucide="refresh-cw"></i></button></div><small id="flash-image-info">Select a previously compiled image. No rebuild required.</small></label>
+              <label class="flash-field flash-wide"><span>USB device</span><div class="flash-select-row"><select id="flash-device" required aria-describedby="flash-device-info"><option value="">Refresh to find connected devices</option></select><button type="button" id="refresh-flash-devices" class="icon-button" title="Refresh USB devices" aria-label="Refresh USB devices"><i data-lucide="refresh-cw"></i></button></div><small id="flash-device-info" role="status">Devices are connected to the compiler machine, not this browser.</small></label>
+              <label class="flash-field"><span>Upload tool</span><select id="flash-tool"><option value="esp">ESP / esptool</option><option value="avr">Arduino AVR / avrdude</option></select></label>
+              <label class="flash-field"><span id="flash-board-label">Board / ESP chip</span><input id="flash-board" value="auto" required maxlength="48" pattern="[a-zA-Z0-9_\-]+" list="flash-board-options" spellcheck="false" autocomplete="off"><datalist id="flash-board-options"><option value="auto"><option value="esp8266"><option value="esp32"><option value="esp32s2"><option value="esp32s3"><option value="esp32c3"><option value="esp32c6"><option value="esp32h2"></datalist></label>
+              <label class="flash-field"><span>Upload baud rate</span><input id="flash-baud" type="number" min="1200" max="4000000" step="1" value="460800" required></label>
+              <label class="flash-field" id="flash-programmer-field" hidden><span>Programmer / bootloader</span><input id="flash-programmer" value="arduino" maxlength="48" pattern="[a-zA-Z0-9_\-]+" placeholder="arduino, wiring, stk500v1" spellcheck="false"></label>
+              <label class="flash-field" id="flash-layout-field"><span>Binary layout</span><select id="flash-layout"><option value="combined">Combined / full-flash image</option><option value="application">Application image only (ESP32)</option><option value="custom">Custom offset</option></select></label>
+              <label class="flash-field" id="flash-offset-field"><span>Flash offset</span><input id="flash-offset" value="0x0" required pattern="(0x[0-9a-fA-F]{1,8}|[0-9]{1,10})" spellcheck="false"></label>
+              <label class="flash-field flash-wide"><span>Additional parameters <span class="muted">/ optional</span></span><input id="flash-parameters" maxlength="2048" placeholder="--flash_mode dio --flash_freq 40m --flash_size detect" spellcheck="false" aria-describedby="flash-parameter-help"><small id="flash-parameter-help">Supports --before, --after, --connect-attempts, --flash_mode, --flash_freq, --flash_size, --spi-connection, --compress and --no-compress. Space-separated values, no shell commands.</small></label>
+              <div class="flash-notice flash-wide"><i data-lucide="info"></i><p id="flash-safety-note">Use a merged binary at its intended base address (usually 0x0). A standard ESP32 firmware.bin is application-only, usually at 0x10000, and needs matching bootloader and partitions already on the device. Check your board's layout before flashing.</p></div>
+              <div class="flash-actions flash-wide"><span id="flash-ready" class="config-status" role="status">Select firmware and a USB device</span><button type="submit" id="flash-button" class="compile-button" disabled><i data-lucide="zap"></i> FLASH FIRMWARE</button></div>
+            </form>
+          </section>
+          <section class="terminal-shell flash-terminal" aria-label="Upload terminal">
+            <div class="terminal-toolbar"><div class="terminal-tab"><i data-lucide="square-terminal"></i><span>Upload output</span></div><button type="button" id="flash-stop" class="stop-button" hidden><i data-lucide="square"></i> Stop</button></div>
+            <div class="build-heading"><div class="build-title"><span id="flash-status" class="build-status-badge">STANDBY</span><span id="flash-title">No upload selected</span></div></div>
+            <div id="flash-output" class="terminal-output" tabindex="0" aria-label="Flasher output"><div id="flash-empty" class="terminal-empty"><div class="terminal-empty-symbol"><i data-lucide="usb"></i></div><h2>Ready to connect</h2><p class="mono">Select saved firmware and a server USB device</p></div><pre id="flash-log" hidden></pre></div>
+            <div class="terminal-footer"><span id="flash-step">ESP uploads try the stub first, then retry without it</span><span id="flash-elapsed" class="mono">00:00</span></div>
+          </section>
+        </div>
+        <aside class="flash-sidebar" aria-label="Upload history">
+          <div class="stats-section-heading"><h2><i data-lucide="history"></i> Recent uploads</h2><span class="section-meta">Shared</span></div>
+          <div id="flash-history"><p class="archive-empty">No uploads yet</p></div>
+          <div class="flash-help"><h3>Connect. Select. Flash.</h3><p>Use a data-capable USB cable. Close serial monitors before starting. If connection fails, hold BOOT while connecting or reset the board into its bootloader.</p><p>ESP uploads automatically retry once without the RAM stub if the first attempt fails. Only one upload runs at a time.</p><p>Flashing overwrites device firmware. Do not unplug during an upload. AVR mode supports serial bootloaders such as Uno, Nano and Mega; other Arduino families need their own upload tools.</p></div>
+        </aside>
+      </div>
     </section>
 
     <section id="stats-view" role="tabpanel" aria-labelledby="stats-tab" hidden>
